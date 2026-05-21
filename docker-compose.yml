@@ -1,0 +1,48 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_PASSWORD: dev
+      POSTGRES_USER: dev
+      POSTGRES_DB: microservice_dev
+    volumes:
+      - ./data/db/postgres:/var/lib/postgresql/data
+
+  migrate:
+    image: migrate/migrate
+    depends_on:
+      - postgres
+    volumes:
+      - ./db/migrations:/migrations
+    command: ["-path=/migrations", "-database", "postgres://dev:dev@postgres:5432/microservice_dev?sslmode=disable", "up"]
+
+  app:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      - postgres
+    ports:
+      - "8080:8080"   # HTTP REST API
+      - "9090:9090"   # gRPC
+    environment:
+      # Database configuration
+      DATABASE_ENABLED: "true"
+      DATABASE_HOST: postgres
+      DATABASE_PORT: 5432
+      DATABASE_USER: dev
+      DATABASE_PASSWORD: dev
+      DATABASE_NAME: microservice_dev
+      # HTTP REST API configuration
+      HTTP_ENABLED: "true"
+      HTTP_HOST: "0.0.0.0"
+      HTTP_PORT: 8080
+      HTTP_MOCK_AUTH: "true"  # Bypass JWT validation for local dev
+      # gRPC configuration
+      GRPC_ENABLED: "true"
+      GRPC_HOST: "0.0.0.0"
+      GRPC_PORT: 9090

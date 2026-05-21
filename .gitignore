@@ -1,0 +1,44 @@
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool, specifically when used with LiteIDE
+*.out
+
+# Dependency directories (remove the comment below to include it)
+# vendor/
+
+.idea/
+
+__debug_bin
+
+microservice-template
+
+# Template synchronization metadata (only in downstream repos)
+.template-version
+
+# TODO: add any required ignore patterns here
+
+# Generated protobuf outputs (kept locally, not committed)
+*.pb.go
+*_grpc.pb.go
+
+# Generated swagger/HTTP API code (kept locally, not committed)
+internal/http/server/
+internal/http/models/
+
+# Local docker-compose data
+/data/
+
+.env
+
+local
+
+
+microservice-template

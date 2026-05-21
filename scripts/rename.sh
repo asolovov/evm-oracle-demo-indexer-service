@@ -1,0 +1,166 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "${ROOT_DIR}"
+
+usage() {
+  cat <<'EOF'
+Usage: make rename NEW_NAME=<module-or-binary-name>
+
+NEW_NAME should be a valid Go module path or name.
+Examples:
+  make rename NEW_NAME=my-service
+  make rename NEW_NAME=github.com/yourorg/my-service
+EOF
+}
+
+NEW_MODULE=${1:-}
+if [[ -z "${NEW_MODULE}" ]]; then
+  usage
+  exit 1
+fi
+
+NAME_REGEX='^[a-z0-9][a-z0-9-]*(/[a-z0-9][a-z0-9-]*)*$'
+if [[ ! "${NEW_MODULE}" =~ ${NAME_REGEX} ]]; then
+  echo "Error: NEW_NAME must match ${NAME_REGEX}" >&2
+  exit 1
+fi
+
+if [[ ! -f go.mod ]]; then
+  echo "Error: go.mod not found; run from repository root" >&2
+  exit 1
+fi
+
+CURRENT_MODULE=$(perl -ne 'print $1 and exit if /^module\s+(.+)/' go.mod)
+if [[ -z "${CURRENT_MODULE}" ]]; then
+  echo "Error: could not determine current module from go.mod" >&2
+  exit 1
+fi
+
+CURRENT_BASE=${CURRENT_MODULE##*/}
+NEW_BASE=${NEW_MODULE##*/}
+NEW_PASCAL=$(echo "${NEW_BASE}" | perl -pe 's/(^|-)([a-z0-9])/uc($2)/ge; s/[^A-Za-z0-9]//g')
+# Preserve API acronym casing (e.g., my-api -> MyAPI)
+NEW_PASCAL=$(echo "${NEW_PASCAL}" | perl -pe 's/Api/API/g')
+API_STRUCT_NAME="${NEW_PASCAL}APIAPI"
+
+cat <<EOF
+Renaming project
+  Current module: ${CURRENT_MODULE}
+  New module:     ${NEW_MODULE}
+  Current binary: ${CURRENT_BASE}
+  New binary:     ${NEW_BASE}
+  Entry point:    cmd/${NEW_BASE}.go
+  Will update:
+    - go.mod module path
+    - Go imports
+    - Makefile (APP, APP_ENTRY_POINT, GITVER_PKG)
+    - Entry file rename (cmd/${CURRENT_BASE}.go -> cmd/${NEW_BASE}.go)
+    - Cobra root command name
+    - Dockerfile binary name
+    - README.md and AGENTS.md references
+    - Optional: git remote URL (set NEW_REMOTE to change)
+EOF
+
+update_go_mod() {
+  perl -pi -e "s|^module\\s+.+$|module ${NEW_MODULE}|" go.mod
+}
+
+update_go_imports() {
+  find . -type f -name '*.go' -not -path './vendor/*' -print0 \
+    | xargs -0 perl -pi -e "s|\Q${CURRENT_MODULE}\E|${NEW_MODULE}|g"
+}
+
+update_makefile() {
+  perl -pi -e "s|^APP:=.+$|APP:=${NEW_BASE}|" Makefile
+  perl -pi -e "s|^APP_ENTRY_POINT:=cmd/.+$|APP_ENTRY_POINT:=cmd/${NEW_BASE}.go|" Makefile
+  perl -pi -e "s|^GITVER_PKG:=.+$|GITVER_PKG:=${NEW_MODULE}/pkg/version|" Makefile
+}
+
+rename_entrypoint() {
+  local from="cmd/${CURRENT_BASE}.go"
+  local to="cmd/${NEW_BASE}.go"
+  if [[ -f "${from}" && "${from}" != "${to}" ]]; then
+    mv "${from}" "${to}"
+  fi
+}
+
+update_cli_use() {
+  local file="cmd/root/root.go"
+  if [[ -f "${file}" ]]; then
+    perl -pi -e "s|Use: \"\Q${CURRENT_BASE}\E\"|Use: \"${NEW_BASE}\"|" "${file}"
+  fi
+}
+
+update_http_api_struct() {
+  local file="internal/http/module.go"
+  [[ -f "${file}" ]] || return 0
+
+  # Update swagger API struct/type names to match new APP (go-swagger generates <PascalBase>APIAPI)
+  perl -pi -e "s|operations\\.New[[:alnum:]]+APIAPI|operations.New${API_STRUCT_NAME}|g" "${file}"
+  perl -pi -e "s|\*operations\.[[:alnum:]]+APIAPI|*operations.${API_STRUCT_NAME}|g" "${file}"
+}
+
+update_dockerfile() {
+  local file="Dockerfile"
+  [[ -f "${file}" ]] || return 0
+  local docker_name
+  docker_name=$(perl -ne 'if(/ENTRYPOINT \["\/(.+?)"/){print $1; exit}' "${file}")
+  docker_name=${docker_name:-${CURRENT_BASE}}
+  perl -pi -e "s|/app/\Q${docker_name}\E|/app/${NEW_BASE}|g; s|\"/\Q${docker_name}\E\"|\"/${NEW_BASE}\"|g" "${file}"
+}
+
+update_docs() {
+  for file in README.md AGENTS.md; do
+    [[ -f "${file}" ]] || continue
+    perl -pi -e "s|go-\Q${CURRENT_BASE}\E|go-${NEW_BASE}|g" "${file}"
+    perl -pi -e "s|\Q${CURRENT_MODULE}\E|${NEW_MODULE}|g" "${file}"
+    perl -pi -e "s|\Q${CURRENT_BASE}\E|${NEW_BASE}|g" "${file}"
+  done
+}
+
+update_git_remote() {
+  if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    return
+  fi
+
+  NEW_REMOTE=${NEW_REMOTE:-}
+
+  if [[ -z "${NEW_REMOTE}" ]]; then
+    return
+  fi
+
+  if git remote | grep -q '^origin$'; then
+    if [[ "${NEW_REMOTE}" == "-" ]]; then
+      git remote remove origin
+      echo "Removed origin remote"
+    else
+      git remote set-url origin "${NEW_REMOTE}"
+      echo "Updated origin to ${NEW_REMOTE}"
+    fi
+  else
+    git remote add origin "${NEW_REMOTE}"
+    echo "Added origin -> ${NEW_REMOTE}"
+  fi
+}
+
+run_go_mod_tidy() {
+  if command -v go >/dev/null 2>&1; then
+    go mod tidy
+  fi
+}
+
+update_go_mod
+update_go_imports
+update_makefile
+rename_entrypoint
+update_cli_use
+update_dockerfile
+update_docs
+update_http_api_struct
+update_git_remote
+run_go_mod_tidy
+
+echo ""
+echo "Rename complete. Review changes with 'git diff'."
