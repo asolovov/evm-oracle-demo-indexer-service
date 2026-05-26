@@ -1,25 +1,31 @@
-// Package config defines application configuration defaults and schema.
+// Package config defines indexer-service configuration defaults and schema.
 package config
 
 import (
+	"errors"
+	"fmt"
+	"strings"
+
 	"github.com/spf13/viper"
 )
 
-// init initialize default config params.
-//
 //nolint:gochecknoinits // configuration defaults are registered at package load.
 func init() {
 	setDefaults()
 }
 
-// setDefaults exposes default registration for testing.
-// Keep defaults centralized here so tests can reset viper and reapply them.
+// setDefaults registers a viper default for every key the service
+// reads — required by architecture rule 6 (viper.AutomaticEnv alone
+// does not populate nested keys on Unmarshal). Required-but-secret
+// values (DSN passwords, RPC URLs) default to empty strings and are
+// rejected by Validate at startup if still empty post-load.
+//
+//nolint:funlen // a single linear list of viper defaults is more readable than fragmented helpers.
 func setDefaults() {
-	// Core application defaults
+	// Core
 	viper.SetDefault("env", "prod")
 
-	// Database/Repository module defaults
-	viper.SetDefault("database.enabled", false)
+	// Database — owns DB `evm_indexer`, user `indexer_user`.
 	viper.SetDefault("database.driver", "postgres")
 	viper.SetDefault("database.host", "localhost")
 	viper.SetDefault("database.port", 5432)
@@ -27,65 +33,96 @@ func setDefaults() {
 	viper.SetDefault("database.max_open_conns", 25)
 	viper.SetDefault("database.max_idle_conns", 5)
 	viper.SetDefault("database.conn_max_lifetime", 300)
-	viper.SetDefault("database.user", "dev")
-	viper.SetDefault("database.password", "dev")
-	viper.SetDefault("database.name", "microservices_dev")
+	viper.SetDefault("database.user", "indexer_user")
+	viper.SetDefault("database.password", "")
+	viper.SetDefault("database.name", "evm_indexer")
 
-	// gRPC module defaults
-	viper.SetDefault("grpc.enabled", false)
+	// gRPC server (always enabled — indexer is server-only).
 	viper.SetDefault("grpc.host", "0.0.0.0")
 	viper.SetDefault("grpc.port", 9090)
 	viper.SetDefault("grpc.timeout", "30s")
 	viper.SetDefault("grpc.max_send_msg_size", 60*1024*1024)
 	viper.SetDefault("grpc.max_recv_msg_size", 60*1024*1024)
 	viper.SetDefault("grpc.num_stream_workers", 0)
+	viper.SetDefault("grpc.reflection", true)
 
-	// gRPC Client module defaults
-	viper.SetDefault("grpc_client.enabled", false)
-	viper.SetDefault("grpc_client.address", "localhost:9090")
-	viper.SetDefault("grpc_client.timeout", "30s")
-	viper.SetDefault("grpc_client.keep_alive.time", "10s")
-	viper.SetDefault("grpc_client.keep_alive.timeout", "1s")
-	viper.SetDefault("grpc_client.keep_alive.permit_without_stream", true)
+	// Healthz / readyz / metrics listener.
+	viper.SetDefault("healthz.host", "0.0.0.0")
+	viper.SetDefault("healthz.port", 8080)
 
-	// HTTP module defaults
-	viper.SetDefault("http.enabled", false)
-	viper.SetDefault("http.host", "0.0.0.0")
-	viper.SetDefault("http.port", 8080)
-	viper.SetDefault("http.timeout", "30s")
-	viper.SetDefault("http.swagger_spec", "./api/swagger.yaml")
-	viper.SetDefault("http.mock_auth", false)
-	viper.SetDefault("http.admin_emails", []string{})
+	// Chain — must be overridden via env at deploy time.
+	viper.SetDefault("chain.name", "ethereum-sepolia")
+	viper.SetDefault("chain.chain_id", uint64(11155111))
+	viper.SetDefault("chain.ws_url", "")
+	viper.SetDefault("chain.rpc_url", "")
+	viper.SetDefault("chain.registry_address", "")
+	viper.SetDefault("chain.backfill_from_block", uint64(0))
 
-	// CORS defaults
-	viper.SetDefault("http.cors.enabled", true)
-	viper.SetDefault("http.cors.allowed_origins", []string{"*"})
-	viper.SetDefault("http.cors.allowed_methods", []string{"GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"})
-	viper.SetDefault("http.cors.allowed_headers", []string{"*"})
-	viper.SetDefault("http.cors.max_age", 3600)
+	// Indexer knobs.
+	viper.SetDefault("indexer.confirmations", uint32(5))
+	viper.SetDefault("indexer.reorg_check_interval_sec", uint32(10))
+	viper.SetDefault("indexer.backfill_chunk_size", uint64(1000))
+	viper.SetDefault("indexer.stream_subscriber_buffer", 256)
 
-	// Rate limit defaults
-	viper.SetDefault("http.rate_limit.enabled", false)
-	viper.SetDefault("http.rate_limit.requests_per_sec", 100.0)
-	viper.SetDefault("http.rate_limit.burst", 20)
-
-	// Gatekeeper defaults (for future use)
-	viper.SetDefault("http.gatekeeper.address", "localhost:9091")
-	viper.SetDefault("http.gatekeeper.timeout", "5s")
-
-	// WebSocket module defaults
-	viper.SetDefault("websocket.enabled", false)
-	viper.SetDefault("websocket.host", "0.0.0.0")
-	viper.SetDefault("websocket.port", 8081)
-	viper.SetDefault("websocket.timeout", "30s")
-	viper.SetDefault("websocket.read_buffer_size", 1024)
-	viper.SetDefault("websocket.write_buffer_size", 1024)
-	viper.SetDefault("websocket.max_message_size", 512000) // 500KB
-	viper.SetDefault("websocket.ping_interval", "54s")
-	viper.SetDefault("websocket.pong_wait", "60s")
-	viper.SetDefault("websocket.write_wait", "10s")
-
-	// WebSocket connection limits
-	viper.SetDefault("websocket.limits.max_connections", 0)          // 0 = unlimited
-	viper.SetDefault("websocket.limits.max_connections_per_room", 0) // 0 = unlimited
+	// Telemetry.
+	viper.SetDefault("telemetry.log_level", "info")
+	viper.SetDefault("telemetry.log_format", "json")
 }
+
+// Validate fails fast on misconfiguration so an orchestrator's
+// crash-loop surfaces the problem instead of the service running with
+// a half-broken setup. Returns a multi-line aggregated error so
+// operators see every problem in one pass.
+func Validate(s *Scheme) error {
+	var errs []string
+
+	if s.Database == nil || s.Database.Password == "" {
+		errs = append(errs, "database.password is required")
+	}
+	if s.Database != nil && s.Database.Name == "" {
+		errs = append(errs, "database.name is required")
+	}
+
+	if s.Chain == nil {
+		errs = append(errs, "chain block is required")
+	} else {
+		if s.Chain.WSURL == "" {
+			errs = append(errs, "chain.ws_url is required")
+		}
+		if s.Chain.RPCURL == "" {
+			errs = append(errs, "chain.rpc_url is required")
+		}
+		if !strings.HasPrefix(strings.ToLower(s.Chain.RegistryAddress), "0x") || len(s.Chain.RegistryAddress) != 42 {
+			errs = append(errs, "chain.registry_address must be a 0x-prefixed 20-byte hex address")
+		}
+		if s.Chain.ChainID == 0 {
+			errs = append(errs, "chain.chain_id is required")
+		}
+	}
+
+	if s.Indexer == nil {
+		errs = append(errs, "indexer block is required")
+	} else {
+		if s.Indexer.Confirmations == 0 {
+			errs = append(errs, "indexer.confirmations must be >= 1")
+		}
+		if s.Indexer.ReorgCheckIntervalSec == 0 {
+			errs = append(errs, "indexer.reorg_check_interval_sec must be >= 1")
+		}
+		if s.Indexer.BackfillChunkSize == 0 {
+			errs = append(errs, "indexer.backfill_chunk_size must be >= 1")
+		}
+		if s.Indexer.StreamSubscriberBuffer <= 0 {
+			errs = append(errs, "indexer.stream_subscriber_buffer must be >= 1")
+		}
+	}
+
+	if len(errs) == 0 {
+		return nil
+	}
+	return fmt.Errorf("invalid configuration:\n  - %s", strings.Join(errs, "\n  - "))
+}
+
+// ErrNotConfigured is returned when a required config block is missing
+// from a struct that is supposed to be non-nil.
+var ErrNotConfigured = errors.New("config block not configured")
