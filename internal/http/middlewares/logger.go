@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"time"
 
-	"microservice-template/pkg/logger"
+	"github.com/asolovov/evm-oracle-demo-indexer-service/pkg/logger"
 )
 
 // responseWriter wraps http.ResponseWriter to capture status code.

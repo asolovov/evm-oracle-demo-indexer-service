@@ -12,7 +12,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"microservice-template/config"
+	"github.com/asolovov/evm-oracle-demo-indexer-service/config"
 )
 
 // testConfig creates a test WebSocket configuration.

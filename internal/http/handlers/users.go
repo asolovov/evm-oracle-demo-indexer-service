@@ -8,12 +8,12 @@ import (
 
 	"github.com/go-openapi/runtime/middleware"
 
-	"microservice-template/internal/grpcclient"
-	"microservice-template/internal/http/formatter"
-	"microservice-template/internal/http/models"
-	"microservice-template/internal/http/server/operations/users"
-	"microservice-template/internal/service"
-	"microservice-template/pkg/logger"
+	"github.com/asolovov/evm-oracle-demo-indexer-service/internal/grpcclient"
+	"github.com/asolovov/evm-oracle-demo-indexer-service/internal/http/formatter"
+	"github.com/asolovov/evm-oracle-demo-indexer-service/internal/http/models"
+	"github.com/asolovov/evm-oracle-demo-indexer-service/internal/http/server/operations/users"
+	"github.com/asolovov/evm-oracle-demo-indexer-service/internal/service"
+	"github.com/asolovov/evm-oracle-demo-indexer-service/pkg/logger"
 )
 
 // NewGetUserByEmail creates new GetUserByEmail handler.

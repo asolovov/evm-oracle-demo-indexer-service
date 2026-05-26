@@ -3,7 +3,7 @@ package internal
 import (
 	"testing"
 
-	"microservice-template/config"
+	"github.com/asolovov/evm-oracle-demo-indexer-service/config"
 )
 
 func TestNewApplication(t *testing.T) {

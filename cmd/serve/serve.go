@@ -6,8 +6,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"microservice-template/internal"
-	"microservice-template/pkg/logger"
+	"github.com/asolovov/evm-oracle-demo-indexer-service/internal"
+	"github.com/asolovov/evm-oracle-demo-indexer-service/pkg/logger"
 )
 
 // Cmd returns the "serve" command of the application.

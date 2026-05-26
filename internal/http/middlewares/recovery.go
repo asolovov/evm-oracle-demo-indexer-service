@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"runtime/debug"
 
-	"microservice-template/pkg/logger"
+	"github.com/asolovov/evm-oracle-demo-indexer-service/pkg/logger"
 )
 
 // Recovery middleware recovers from panics and returns a 500 Internal Server Error.

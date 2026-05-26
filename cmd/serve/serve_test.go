@@ -6,7 +6,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"microservice-template/internal"
+	"github.com/asolovov/evm-oracle-demo-indexer-service/internal"
 )
 
 type stubApp struct {

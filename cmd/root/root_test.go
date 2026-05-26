@@ -8,8 +8,8 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 
-	"microservice-template/config"
-	"microservice-template/internal"
+	"github.com/asolovov/evm-oracle-demo-indexer-service/config"
+	"github.com/asolovov/evm-oracle-demo-indexer-service/internal"
 )
 
 func resetViper(t *testing.T) {

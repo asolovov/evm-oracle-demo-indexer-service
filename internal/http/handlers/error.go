@@ -2,7 +2,7 @@
 package handlers
 
 import (
-	"microservice-template/internal/http/models"
+	"github.com/asolovov/evm-oracle-demo-indexer-service/internal/http/models"
 )
 
 // DefaultError creates a default error response.

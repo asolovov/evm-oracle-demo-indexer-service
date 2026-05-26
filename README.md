@@ -1,4 +1,4 @@
-# go-microservice-template
+# go-evm-oracle-demo-indexer-service
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![Go Version](https://img.shields.io/badge/Go-1.23%2B-00ADD8?logo=go)](https://go.dev/)
@@ -8,9 +8,9 @@ A minimal Go microservice template with Cobra/Viper CLI wiring, ldflags-driven v
 ## Quickstart
 - Requirements: Go 1.21+ (module sets 1.23/1.24), GNU `make`.
 - Clone and create your branch: `git checkout -b feature/your-branch`.
-- Build: `make build` (binary `./microservice-template`).
-- Run: `make run` (invokes `go run -race cmd/microservice-template.go serve`).
-- Version: `./microservice-template --version`.
+- Build: `make build` (binary `./github.com/asolovov/evm-oracle-demo-indexer-service`).
+- Run: `make run` (invokes `go run -race cmd/github.com/asolovov/evm-oracle-demo-indexer-service.go serve`).
+- Version: `./github.com/asolovov/evm-oracle-demo-indexer-service --version`.
 - Lint: `make lint` (golangci-lint).
 - Test: `make test` or single test `go test ./... -run TestName -count=1`.
 - Generate + test: `make test-with-gen` (runs proto + swagger generation first).
@@ -43,7 +43,7 @@ A minimal Go microservice template with Cobra/Viper CLI wiring, ldflags-driven v
 
 ## Project Structure
 ```
-go-microservice-template/
+go-evm-oracle-demo-indexer-service/
 ├── api/                        # Swagger/OpenAPI specifications
 ├── cmd/                        # CLI entry + commands
 ├── config/                     # Viper defaults and scheme
@@ -482,9 +482,9 @@ This is a basic, generic Go microservice template designed to provide a clear st
   Precedence will ensure flag > env > config file for `port` as well.
 
 ## CLI
-- Root command name: `microservice-template`.
+- Root command name: `github.com/asolovov/evm-oracle-demo-indexer-service`.
 - Subcommands: `serve` (current runtime hook). Add more via `cmd/<name>` and register on root.
-- Version output: `./microservice-template --version` (ldflags populate `pkg/version`).
+- Version output: `./github.com/asolovov/evm-oracle-demo-indexer-service --version` (ldflags populate `pkg/version`).
 - `serve` lifecycle: `PreRun` logs version; `RunE` should start your workloads; `PostRun` always stops app.
 - Adding a new command (example):
   ```go
@@ -504,7 +504,7 @@ This is a basic, generic Go microservice template designed to provide a clear st
       }
   }
   ```
-  Register it in `cmd/microservice-template.go`: `rootCmd.AddCommand(health.Cmd())`.
+  Register it in `cmd/github.com/asolovov/evm-oracle-demo-indexer-service.go`: `rootCmd.AddCommand(health.Cmd())`.
 
 ## Development Workflow
 - Format: `gofmt` (used via go tooling).
@@ -544,14 +544,14 @@ This is a basic, generic Go microservice template designed to provide a clear st
 > **Note:** To rename an existing project, see the [Renaming the project](#renaming-the-project) section in Quickstart.
 
 - Add config: update `Scheme`, `setDefaults`, and CLI flags; test binding like in `cmd/root/root_test.go`.
-- Add commands: create `cmd/<name>` with `cobra.Command`, register on root in `cmd/microservice-template.go`.
+- Add commands: create `cmd/<name>` with `cobra.Command`, register on root in `cmd/github.com/asolovov/evm-oracle-demo-indexer-service.go`.
   After renaming the entrypoint file (e.g., `cmd/yourservice.go`), register new commands there.
 - Add runtime logic: implement `App.Init/Serve/Stop` with proper context/shutdown handling and graceful shutdown.
 - Add tests: follow table-driven patterns; reset global state (Viper) in `t.Cleanup`.
 
 ## Keeping Up-to-Date with Template Changes
 
-This project can receive updates from the upstream template: [go-microservice-template](https://github.com/andskur/go-microservice-template).
+This project can receive updates from the upstream template: [go-evm-oracle-demo-indexer-service](https://github.com/andskur/go-evm-oracle-demo-indexer-service).
 
 ### Initial setup (downstream projects)
 ```bash

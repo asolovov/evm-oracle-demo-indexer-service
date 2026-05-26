@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"microservice-template/internal/models"
-	"microservice-template/internal/repository"
+	"github.com/asolovov/evm-oracle-demo-indexer-service/internal/models"
+	"github.com/asolovov/evm-oracle-demo-indexer-service/internal/repository"
 )
 
 // serviceMockRepository is a simple in-memory repository for testing purposes.

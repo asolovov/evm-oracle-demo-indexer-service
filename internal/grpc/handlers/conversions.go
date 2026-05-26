@@ -4,8 +4,8 @@ package handlers
 import (
 	"fmt"
 
-	"microservice-template/internal/models"
-	proto "microservice-template/protocols/userservice"
+	"github.com/asolovov/evm-oracle-demo-indexer-service/internal/models"
+	proto "github.com/asolovov/evm-oracle-demo-indexer-service/protocols/userservice"
 )
 
 // UserToProto converts domain User to proto User.

@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"strings"
 
-	"microservice-template/config"
+	"github.com/asolovov/evm-oracle-demo-indexer-service/config"
 )
 
 // Cors middleware handles CORS (Cross-Origin Resource Sharing) headers.

@@ -6,7 +6,7 @@ import (
 
 	"golang.org/x/time/rate"
 
-	"microservice-template/config"
+	"github.com/asolovov/evm-oracle-demo-indexer-service/config"
 )
 
 // RateLimit middleware implements token bucket rate limiting.

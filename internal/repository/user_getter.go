@@ -5,7 +5,7 @@ import (
 
 	"github.com/go-pg/pg/v10/orm"
 
-	"microservice-template/internal/models"
+	"github.com/asolovov/evm-oracle-demo-indexer-service/internal/models"
 )
 
 // UserGetter represents available user query strategies.

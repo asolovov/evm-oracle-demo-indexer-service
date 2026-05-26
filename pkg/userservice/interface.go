@@ -4,7 +4,7 @@ package userservice
 import (
 	"context"
 
-	proto "microservice-template/protocols/userservice"
+	proto "github.com/asolovov/evm-oracle-demo-indexer-service/protocols/userservice"
 )
 
 // IUserServiceClient defines the interface for user service client operations.

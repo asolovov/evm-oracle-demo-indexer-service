@@ -10,8 +10,8 @@ import (
 	"google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/keepalive"
 
-	"microservice-template/config"
-	"microservice-template/pkg/logger"
+	"github.com/asolovov/evm-oracle-demo-indexer-service/config"
+	"github.com/asolovov/evm-oracle-demo-indexer-service/pkg/logger"
 )
 
 // Server wraps gRPC server and listener.

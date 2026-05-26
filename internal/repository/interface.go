@@ -1,7 +1,7 @@
 // Package repository defines persistence interfaces and helpers.
 package repository
 
-import "microservice-template/internal/models"
+import "github.com/asolovov/evm-oracle-demo-indexer-service/internal/models"
 
 // IRepository defines the storage interface for database operations.
 // This interface abstracts the underlying database implementation.

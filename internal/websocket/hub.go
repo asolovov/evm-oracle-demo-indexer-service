@@ -4,8 +4,8 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"microservice-template/config"
-	"microservice-template/pkg/logger"
+	"github.com/asolovov/evm-oracle-demo-indexer-service/config"
+	"github.com/asolovov/evm-oracle-demo-indexer-service/pkg/logger"
 )
 
 // Hub maintains the set of active clients and broadcasts messages.

@@ -6,8 +6,8 @@ import (
 
 	"github.com/go-pg/pg/v10"
 
-	"microservice-template/config"
-	"microservice-template/pkg/logger"
+	"github.com/asolovov/evm-oracle-demo-indexer-service/config"
+	"github.com/asolovov/evm-oracle-demo-indexer-service/pkg/logger"
 )
 
 // Module implements module.Module interface for repository layer.

@@ -11,7 +11,7 @@ import (
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/status"
 
-	proto "microservice-template/protocols/userservice"
+	proto "github.com/asolovov/evm-oracle-demo-indexer-service/protocols/userservice"
 )
 
 // Client implements IUserServiceClient for external user service.

@@ -8,9 +8,9 @@ import (
 	"github.com/go-openapi/strfmt"
 	"github.com/gofrs/uuid"
 
-	"microservice-template/internal/http/models"
-	"microservice-template/internal/service"
-	"microservice-template/pkg/logger"
+	"github.com/asolovov/evm-oracle-demo-indexer-service/internal/http/models"
+	"github.com/asolovov/evm-oracle-demo-indexer-service/internal/service"
+	"github.com/asolovov/evm-oracle-demo-indexer-service/pkg/logger"
 )
 
 // Auth handles JWT token validation and user authentication.

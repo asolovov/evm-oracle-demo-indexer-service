@@ -7,9 +7,9 @@ import (
 	"github.com/go-openapi/runtime/middleware"
 	"github.com/go-openapi/strfmt"
 
-	"microservice-template/internal/http/models"
-	"microservice-template/internal/http/server/operations/health"
-	"microservice-template/pkg/version"
+	"github.com/asolovov/evm-oracle-demo-indexer-service/internal/http/models"
+	"github.com/asolovov/evm-oracle-demo-indexer-service/internal/http/server/operations/health"
+	"github.com/asolovov/evm-oracle-demo-indexer-service/pkg/version"
 )
 
 // NewHealth creates new Health handler.

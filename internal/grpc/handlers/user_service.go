@@ -9,8 +9,8 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"microservice-template/internal/service"
-	proto "microservice-template/protocols/userservice"
+	"github.com/asolovov/evm-oracle-demo-indexer-service/internal/service"
+	proto "github.com/asolovov/evm-oracle-demo-indexer-service/protocols/userservice"
 )
 
 // UserServiceHandler implements the UserService gRPC service.

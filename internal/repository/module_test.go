@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"microservice-template/config"
-	"microservice-template/internal/models"
+	"github.com/asolovov/evm-oracle-demo-indexer-service/config"
+	"github.com/asolovov/evm-oracle-demo-indexer-service/internal/models"
 )
 
 // moduleMockRepository is a simple in-memory repository for testing purposes.

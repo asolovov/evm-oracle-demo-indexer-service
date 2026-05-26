@@ -1,4 +1,4 @@
-module microservice-template
+module github.com/asolovov/evm-oracle-demo-indexer-service
 
 go 1.24.0
 

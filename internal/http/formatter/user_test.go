@@ -7,8 +7,8 @@ import (
 	"github.com/go-openapi/strfmt"
 	"github.com/gofrs/uuid"
 
-	apimodels "microservice-template/internal/http/models"
-	"microservice-template/internal/models"
+	apimodels "github.com/asolovov/evm-oracle-demo-indexer-service/internal/http/models"
+	"github.com/asolovov/evm-oracle-demo-indexer-service/internal/models"
 )
 
 func TestUserToAPI(t *testing.T) {

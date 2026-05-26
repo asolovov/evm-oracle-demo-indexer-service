@@ -1,4 +1,4 @@
-# Agent Guide for go-microservice-template
+# Agent Guide for go-evm-oracle-demo-indexer-service
 
 Scope: applies to entire repo.
 No other AGENTS.md or Cursor/Copilot rules found.
@@ -6,11 +6,11 @@ No other AGENTS.md or Cursor/Copilot rules found.
 ## Commands
 - Prefer Makefile targets when available.
 - Build: `make build` (uses ldflags for version info).
-- Build binary output: `./microservice-template` in repo root.
-- Run app: `make run` (invokes `go run -race cmd/microservice-template.go serve`).
-- Show version template at runtime: `./microservice-template --version`.
-- `cmd/microservice-template.go`: entry; wires cobra root + serve, executes CLI.
-- Keep binary name driven by `APP` variable (`microservice-template`).
+- Build binary output: `./github.com/asolovov/evm-oracle-demo-indexer-service` in repo root.
+- Run app: `make run` (invokes `go run -race cmd/github.com/asolovov/evm-oracle-demo-indexer-service.go serve`).
+- Show version template at runtime: `./github.com/asolovov/evm-oracle-demo-indexer-service --version`.
+- `cmd/github.com/asolovov/evm-oracle-demo-indexer-service.go`: entry; wires cobra root + serve, executes CLI.
+- Keep binary name driven by `APP` variable (`github.com/asolovov/evm-oracle-demo-indexer-service`).
 - Rename project: `make rename NEW_NAME=my-service` (validates name, updates module/imports/Makefile/Dockerfile/docs/CLI/swagger API struct; optional NEW_REMOTE for git remote).
 - After rename: run `make generate-all` (protos + swagger) before builds/tests to refresh generated code.
 - Rename validation: lowercase letters, numbers, hyphens, optional path segments (`my-service`, `github.com/org/my-service`).
@@ -38,7 +38,7 @@ No other AGENTS.md or Cursor/Copilot rules found.
 - Keep lines < 120 chars when reasonable; no trailing whitespace; unix line endings.
 
 ## Imports
-- Group imports: stdlib, blank line, third-party, blank line, local (`microservice-template/...`).
+- Group imports: stdlib, blank line, third-party, blank line, local (`github.com/asolovov/evm-oracle-demo-indexer-service/...`).
 - Keep deterministic ordering (gofmt).
 - Avoid import aliases unless necessary to disambiguate.
 - Do not use dot imports.
@@ -404,10 +404,10 @@ websocket:
 ## Docker
 - Dockerfile: multi-stage build (golang:1.24 builder → scratch); invokes `make build`.
 - Binary name in Dockerfile COPY/ENTRYPOINT must match Makefile `APP` variable.
-- Current binary: `/microservice-template` (synced with `APP:=microservice-template`).
+- Current binary: `/github.com/asolovov/evm-oracle-demo-indexer-service` (synced with `APP:=github.com/asolovov/evm-oracle-demo-indexer-service`).
 - `make rename` updates Dockerfile automatically.
-- Build: `docker build -t microservice-template .`
-- Run: `docker run --rm microservice-template` (defaults to `serve`).
+- Build: `docker build -t github.com/asolovov/evm-oracle-demo-indexer-service .`
+- Run: `docker run --rm github.com/asolovov/evm-oracle-demo-indexer-service` (defaults to `serve`).
 - Best practices: use `.dockerignore` to reduce context; multi-stage keeps final image minimal.
 - Cross-compilation: override `GOOS`/`GOARCH` on `make build` before docker build if needed.
 

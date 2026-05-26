@@ -10,14 +10,14 @@ import (
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
 
-	"microservice-template/config"
-	"microservice-template/internal"
+	"github.com/asolovov/evm-oracle-demo-indexer-service/config"
+	"github.com/asolovov/evm-oracle-demo-indexer-service/internal"
 )
 
 // Cmd returns the root command for the application.
 func Cmd(app *internal.App) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:              "microservice-template",
+		Use:              "github.com/asolovov/evm-oracle-demo-indexer-service",
 		Short:            "Service Template",
 		TraverseChildren: true,
 		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {

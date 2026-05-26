@@ -1,14 +1,14 @@
 # Set APP to the name of the application
-APP:=microservice-template
+APP:=evm-oracle-demo-indexer-service
 
 # Set APP_ENTRY_POINT to the main Go file for the application
-APP_ENTRY_POINT:=cmd/microservice-template.go
+APP_ENTRY_POINT:=cmd/evm-oracle-demo-indexer-service.go
 
 # Set BUILD_OUT_DIR to the directory where the built executable should be placed
 BUILD_OUT_DIR:=./
 
 # path to version package
-GITVER_PKG:=microservice-template/pkg/version
+GITVER_PKG:=github.com/asolovov/evm-oracle-demo-indexer-service/pkg/version
 
 # Set GOOS and GOARCH to the current system values using the go env command
 GOOS=$(shell go env GOOS)

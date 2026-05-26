@@ -31,8 +31,8 @@ FROM scratch
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 
 # Copy the built executable from the builder image
-COPY --from=builder /app/microservice-template /microservice-template
+COPY --from=builder /app/evm-oracle-demo-indexer-service /microservice-template
 
 # Set the entrypoint to the executable
-ENTRYPOINT ["/microservice-template"]
+ENTRYPOINT ["/evm-oracle-demo-indexer-service"]
 CMD ["serve"]

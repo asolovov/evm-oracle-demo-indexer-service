@@ -7,8 +7,8 @@ import (
 	"github.com/go-openapi/strfmt"
 	"github.com/gofrs/uuid"
 
-	apiModels "microservice-template/internal/http/models"
-	domainModels "microservice-template/internal/models"
+	apiModels "github.com/asolovov/evm-oracle-demo-indexer-service/internal/http/models"
+	domainModels "github.com/asolovov/evm-oracle-demo-indexer-service/internal/models"
 )
 
 // UserToAPI converts domain User model to API User model.
