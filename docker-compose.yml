@@ -1,5 +1,15 @@
 version: '3.8'
 
+# Local-dev stack for evm-oracle-demo-indexer-service.
+#
+# Brings up:
+#   - postgres 16 with the dedicated `evm_indexer` DB + `indexer_user`.
+#   - migrate (golang-migrate) applying `./migrations` against it.
+#   - the indexer-service itself.
+#
+# CHAIN_WS_URL and CHAIN_RPC_URL must be set in `.env` (or your shell)
+# before `docker compose up`. Without them config Validate fails fast.
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -7,42 +17,56 @@ services:
     ports:
       - "5432:5432"
     environment:
-      POSTGRES_PASSWORD: dev
-      POSTGRES_USER: dev
-      POSTGRES_DB: microservice_dev
+      POSTGRES_PASSWORD: indexerpw
+      POSTGRES_USER: indexer_user
+      POSTGRES_DB: evm_indexer
     volumes:
       - ./data/db/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U indexer_user -d evm_indexer"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
 
   migrate:
-    image: migrate/migrate
+    image: migrate/migrate:v4.18.1
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
     volumes:
-      - ./db/migrations:/migrations
-    command: ["-path=/migrations", "-database", "postgres://dev:dev@postgres:5432/microservice_dev?sslmode=disable", "up"]
+      - ./migrations:/migrations
+    command: ["-path=/migrations", "-database", "postgres://indexer_user:indexerpw@postgres:5432/evm_indexer?sslmode=disable", "up"]
 
-  app:
+  indexer:
     build: .
     restart: unless-stopped
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     ports:
-      - "8080:8080"   # HTTP REST API
       - "9090:9090"   # gRPC
+      - "8080:8080"   # healthz + readyz + metrics
     environment:
-      # Database configuration
-      DATABASE_ENABLED: "true"
       DATABASE_HOST: postgres
       DATABASE_PORT: 5432
-      DATABASE_USER: dev
-      DATABASE_PASSWORD: dev
-      DATABASE_NAME: microservice_dev
-      # HTTP REST API configuration
-      HTTP_ENABLED: "true"
-      HTTP_HOST: "0.0.0.0"
-      HTTP_PORT: 8080
-      HTTP_MOCK_AUTH: "true"  # Bypass JWT validation for local dev
-      # gRPC configuration
-      GRPC_ENABLED: "true"
+      DATABASE_USER: indexer_user
+      DATABASE_PASSWORD: indexerpw
+      DATABASE_NAME: evm_indexer
       GRPC_HOST: "0.0.0.0"
       GRPC_PORT: 9090
+      HEALTHZ_HOST: "0.0.0.0"
+      HEALTHZ_PORT: 8080
+      CHAIN_NAME: ${CHAIN_NAME:-ethereum-sepolia}
+      CHAIN_CHAIN_ID: ${CHAIN_CHAIN_ID:-11155111}
+      CHAIN_WS_URL: ${CHAIN_WS_URL}
+      CHAIN_RPC_URL: ${CHAIN_RPC_URL}
+      CHAIN_REGISTRY_ADDRESS: ${CHAIN_REGISTRY_ADDRESS:-0x89a6c12a403733c6a817472cec46a530581cb7ef}
+      CHAIN_BACKFILL_FROM_BLOCK: ${CHAIN_BACKFILL_FROM_BLOCK:-0}
+      INDEXER_CONFIRMATIONS: ${INDEXER_CONFIRMATIONS:-5}
+      INDEXER_REORG_CHECK_INTERVAL_SEC: ${INDEXER_REORG_CHECK_INTERVAL_SEC:-10}
+      INDEXER_BACKFILL_CHUNK_SIZE: ${INDEXER_BACKFILL_CHUNK_SIZE:-1000}
+      INDEXER_STREAM_SUBSCRIBER_BUFFER: ${INDEXER_STREAM_SUBSCRIBER_BUFFER:-256}
+      TELEMETRY_LOG_LEVEL: ${TELEMETRY_LOG_LEVEL:-info}
+      TELEMETRY_LOG_FORMAT: ${TELEMETRY_LOG_FORMAT:-json}
