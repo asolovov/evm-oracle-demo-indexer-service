@@ -149,6 +149,7 @@ func (app *App) runtime(mts *metrics.Registry) {
 //   - confirmer.Run goroutine: ticks every reorg_check_interval_sec.
 //   - module.Manager.StartAll: brings up the gRPC server + healthz.
 func (app *App) Serve() error {
+	//nolint:gosec // cancel is stored in app.cancelRuntime and explicitly invoked from app.Stop; deferring here would terminate the runtime as soon as Serve returns (defeating the long-running design).
 	runtimeCtx, cancel := context.WithCancel(context.Background())
 	app.cancelRuntime = cancel
 

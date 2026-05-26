@@ -64,8 +64,8 @@ type DropReason string
 const (
 	// DropReasonSlow — the subscriber's buffer overflowed.
 	DropReasonSlow DropReason = "slow"
-	// DropReasonContext — the subscriber's context was cancelled.
-	DropReasonContext DropReason = "context_cancelled"
+	// DropReasonContext — the subscriber's context was canceled.
+	DropReasonContext DropReason = "context_canceled"
 )
 
 // Subscription is the read-side of a stream-hub subscriber.
@@ -78,7 +78,7 @@ type Subscription struct {
 }
 
 // Events returns the receive channel. Closed when the subscription is
-// cancelled (either by the caller via Cancel or by the hub on slow-
+// canceled (either by the caller via Cancel or by the hub on slow-
 // consumer drop / shutdown).
 func (s *Subscription) Events() <-chan *models.Event { return s.ch }
 

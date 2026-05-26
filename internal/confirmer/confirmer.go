@@ -36,7 +36,7 @@ type HeadProvider interface {
 	HeaderByHash(ctx context.Context, hash common.Hash) (*types.Header, error)
 }
 
-// Publisher publishes a finalised event to subscribers. Implemented
+// Publisher publishes a finalized event to subscribers. Implemented
 // by *streamhub.Hub in production.
 type Publisher interface {
 	Publish(e *models.Event) int
@@ -99,7 +99,7 @@ func New(store EventStore, chain HeadProvider, publisher Publisher, cfg Config) 
 	}
 }
 
-// Run blocks until ctx is cancelled. The confirmer is single-shot —
+// Run blocks until ctx is canceled. The confirmer is single-shot —
 // concurrent Run calls return an error rather than racing on internal
 // state.
 func (c *Confirmer) Run(ctx context.Context) error {

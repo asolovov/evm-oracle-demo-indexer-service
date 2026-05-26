@@ -41,7 +41,7 @@ func TestDefaultsRegistered(t *testing.T) {
 
 	for _, c := range cases {
 		got := viper.Get(c.key)
-		// Compare via fmt so int vs uint typing artefacts in viper don't trip the test.
+		// Compare via fmt so int vs uint typing artifacts in viper don't trip the test.
 		if fmt.Sprint(got) != fmt.Sprint(c.want) {
 			t.Errorf("key %q: want %v, got %v", c.key, c.want, got)
 		}

@@ -60,7 +60,7 @@ func (k EventKind) IsValid() bool {
 }
 
 // ParseEventKind converts the canonical string form back to a kind.
-// Returns EventKindUnknown + a non-nil error for unrecognised input.
+// Returns EventKindUnknown + a non-nil error for unrecognized input.
 func ParseEventKind(s string) (EventKind, error) {
 	if k, ok := eventKindFromString[s]; ok {
 		return k, nil
@@ -77,6 +77,8 @@ func (k EventKind) ToProto() indexerv1.EventKind {
 		return indexerv1.EventKind_EVENT_KIND_PRICE_FULFILLED
 	case EventKindAssetRegistered:
 		return indexerv1.EventKind_EVENT_KIND_ASSET_REGISTERED
+	case EventKindUnknown:
+		return indexerv1.EventKind_EVENT_KIND_UNSPECIFIED
 	default:
 		return indexerv1.EventKind_EVENT_KIND_UNSPECIFIED
 	}
@@ -93,6 +95,8 @@ func EventKindFromProto(p indexerv1.EventKind) EventKind {
 		return EventKindPriceFulfilled
 	case indexerv1.EventKind_EVENT_KIND_ASSET_REGISTERED:
 		return EventKindAssetRegistered
+	case indexerv1.EventKind_EVENT_KIND_UNSPECIFIED:
+		return EventKindUnknown
 	default:
 		return EventKindUnknown
 	}

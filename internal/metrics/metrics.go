@@ -50,14 +50,14 @@ func New() *Registry {
 		StreamSubscribers: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
 				Name: "indexer_stream_subscribers",
-				Help: "Active StreamEvents subscribers, labelled by kind filter.",
+				Help: "Active StreamEvents subscribers, labeled by kind filter.",
 			},
 			[]string{"kind"},
 		),
 		StreamDrops: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
 				Name: "indexer_stream_drops_total",
-				Help: "StreamEvents subscriber drops, labelled by reason.",
+				Help: "StreamEvents subscriber drops, labeled by reason.",
 			},
 			[]string{"reason"},
 		),

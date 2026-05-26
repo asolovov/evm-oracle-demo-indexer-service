@@ -32,7 +32,7 @@ func TestEventKindUnknown(t *testing.T) {
 
 func TestParseEventKindUnknownRejected(t *testing.T) {
 	if _, err := ParseEventKind("NOT_A_KIND"); err == nil {
-		t.Error("expected error for unrecognised input")
+		t.Error("expected error for unrecognized input")
 	}
 }
 

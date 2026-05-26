@@ -198,7 +198,7 @@ WHERE req_id = $1
   AND confirmations >= $2
 ORDER BY block_number ASC, log_index ASC`
 
-	rows, err := r.pool.Query(ctx, q, reqID.String(), int32(confirmations)) //nolint:gosec
+	rows, err := r.pool.Query(ctx, q, reqID.String(), int32(confirmations)) //nolint:gosec // confirmations + blocks are 0..N, well under int32/int64 max.
 	if err != nil {
 		return nil, fmt.Errorf("events for request query: %w", err)
 	}
@@ -224,7 +224,7 @@ WHERE orphaned = FALSE
 ORDER BY block_number ASC, log_index ASC
 LIMIT $2`
 
-	rows, err := r.pool.Query(ctx, q, int32(confirmations), limit) //nolint:gosec
+	rows, err := r.pool.Query(ctx, q, int32(confirmations), limit) //nolint:gosec // confirmations + blocks are 0..N, well under int32/int64 max.
 	if err != nil {
 		return nil, fmt.Errorf("pending events query: %w", err)
 	}
@@ -235,7 +235,7 @@ LIMIT $2`
 // UpdateConfirmations writes the new confirmation depth for an event.
 // Returns ErrNotFound if id is unknown.
 func (r *Repository) UpdateConfirmations(ctx context.Context, id int64, confirmations uint32) error {
-	tag, err := r.pool.Exec(ctx, `UPDATE events SET confirmations = $1 WHERE id = $2`, int32(confirmations), id) //nolint:gosec
+	tag, err := r.pool.Exec(ctx, `UPDATE events SET confirmations = $1 WHERE id = $2`, int32(confirmations), id) //nolint:gosec // confirmations + blocks are 0..N, well under int32/int64 max.
 	if err != nil {
 		return fmt.Errorf("update confirmations: %w", err)
 	}
@@ -388,6 +388,8 @@ func encodePayloads(e *models.Event) (encodedPayloads, error) {
 			return out, fmt.Errorf("marshal AssetRegistered: %w", err)
 		}
 		out.assetRegistered = b
+	case models.EventKindUnknown:
+		return out, fmt.Errorf("cannot encode payload for EventKindUnknown")
 	default:
 		return out, fmt.Errorf("unsupported event kind: %s", e.Kind)
 	}
@@ -534,6 +536,8 @@ func scanEvent(rows pgx.Rows) (*models.Event, error) {
 			AssetID:    common.HexToHash(p.AssetID),
 			Aggregator: common.HexToAddress(p.Aggregator),
 		}
+	case models.EventKindUnknown:
+		return nil, fmt.Errorf("EventKindUnknown is not persistable: row id=%d", e.ID)
 	default:
 		return nil, fmt.Errorf("unsupported event kind in db row: %s", kind)
 	}

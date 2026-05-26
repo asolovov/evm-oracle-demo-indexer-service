@@ -106,6 +106,8 @@ func sampleEvent(id int64, block uint64, kind models.EventKind, asset common.Has
 		}
 	case models.EventKindAssetRegistered:
 		e.AssetRegistered = &models.AssetRegisteredPayload{AssetID: asset, Aggregator: common.HexToAddress("0xee")}
+	case models.EventKindUnknown:
+		// no payload — sentinel for test misuse
 	}
 	return e
 }

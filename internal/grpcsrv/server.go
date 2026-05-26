@@ -6,7 +6,7 @@
 //     desc by (block_number, log_index).
 //
 //   - GetRequest — joins PriceRequested + PriceFulfilled by req_id,
-//     returns lifecycle + tx hashes + last-known fulfilment price.
+//     returns lifecycle + tx hashes + last-known fulfillment price.
 //
 //   - StreamEvents — long-lived server stream. Replay-then-live: if
 //     `from_block > 0` the server first drains the matching backlog
@@ -71,7 +71,7 @@ type Server struct {
 }
 
 // New wires the gRPC server with the supplied dependencies. `cfg.Port`
-// is honoured at Start time; New does not bind the socket.
+// is honored at Start time; New does not bind the socket.
 func New(cfg *config.GRPCConfig, reader EventReader, hub StreamHub, confirmations uint32) *Server {
 	return &Server{
 		cfg:           cfg,
@@ -218,6 +218,8 @@ func (s *Server) GetRequest(ctx context.Context, req *indexerv1.GetRequestReques
 			if out.AssetId == "" {
 				out.AssetId = strings.ToLower(e.PriceFulfilled.AssetID.Hex())
 			}
+		case models.EventKindAssetRegistered, models.EventKindUnknown:
+			// AssetRegistered isn't tied to a req_id; Unknown is a sentinel.
 		}
 	}
 	return out, nil

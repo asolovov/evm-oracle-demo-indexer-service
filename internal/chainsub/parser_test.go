@@ -32,7 +32,7 @@ func TestEventTopicsMatchSolidityHashes(t *testing.T) {
 		t.Errorf("PriceFulfilled topic = %s, want %s", priceFulfilledTopic.Hex(), wantPriceFulfilled.Hex())
 	}
 	if (assetRegisteredTopic == common.Hash{}) {
-		t.Error("AssetRegistered topic uninitialised")
+		t.Error("AssetRegistered topic uninitialized")
 	}
 }
 

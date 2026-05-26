@@ -43,6 +43,8 @@ func sampleEvent(kind EventKind) *Event {
 			AssetID:    e.AssetID,
 			Aggregator: e.ContractAddress,
 		}
+	case EventKindUnknown:
+		// no payload — sentinel
 	}
 	return e
 }

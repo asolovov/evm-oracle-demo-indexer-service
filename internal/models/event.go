@@ -135,6 +135,8 @@ func (e *Event) ToProto() (*indexerv1.Event, error) {
 				Aggregator: strings.ToLower(e.AssetRegistered.Aggregator.Hex()),
 			},
 		}
+	case EventKindUnknown:
+		return nil, fmt.Errorf("%w: kind=UNKNOWN", ErrPayloadMissing)
 	default:
 		return nil, fmt.Errorf("%w: kind=%s", ErrPayloadMissing, e.Kind)
 	}

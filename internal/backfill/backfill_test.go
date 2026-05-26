@@ -2,6 +2,7 @@ package backfill
 
 import (
 	"context"
+	"errors"
 	"math/big"
 	"sort"
 	"sync"
@@ -127,8 +128,9 @@ func TestBackfill_ChunkingAndCursorAdvance(t *testing.T) {
 	asset := common.HexToHash("0xaa")
 	requester := common.HexToAddress("0xCEF4Fe1CA9071f4ED4BAd6c1087CEb08838a983E")
 
-	var logs []types.Log
-	for i, blk := range []uint64{5, 17, 28, 42, 51, 66, 79} {
+	blocks := []uint64{5, 17, 28, 42, 51, 66, 79}
+	logs := make([]types.Log, 0, len(blocks))
+	for i, blk := range blocks {
 		logs = append(logs, buildPriceRequestedLog(aggregator, big.NewInt(int64(i+1)), requester, blk, byte(i+1)))
 	}
 
@@ -200,7 +202,7 @@ func TestBackfill_ContextCancelStops(t *testing.T) {
 	cancel()
 
 	err := r.Run(ctx)
-	if err == nil || err != context.Canceled {
-		t.Errorf("Run on cancelled ctx returned %v, want context.Canceled", err)
+	if err == nil || !errors.Is(err, context.Canceled) {
+		t.Errorf("Run on canceled ctx returned %v, want context.Canceled", err)
 	}
 }

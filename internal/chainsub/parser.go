@@ -120,7 +120,7 @@ func (p *Parser) buildPriceRequested(log types.Log, raw *priceaggregator.PriceAg
 		TxHash:          log.TxHash,
 		BlockHash:       log.BlockHash,
 		BlockNumber:     log.BlockNumber,
-		LogIndex:        uint32(log.Index), //nolint:gosec // 32-bit log index is plenty.
+		LogIndex:        uint32(log.Index), //nolint:gosec // log index per block is bounded by gas limit; never exceeds uint32.
 		ObservedAt:      time.Now().UTC(),
 		AssetID:         asset,
 		ReqID:           new(big.Int).Set(raw.ReqId),
@@ -149,7 +149,7 @@ func (p *Parser) parsePriceFulfilled(log types.Log) (*models.Event, error) {
 		TxHash:          log.TxHash,
 		BlockHash:       log.BlockHash,
 		BlockNumber:     log.BlockNumber,
-		LogIndex:        uint32(log.Index), //nolint:gosec
+		LogIndex:        uint32(log.Index), //nolint:gosec // log index per block is bounded by gas limit; never exceeds uint32.
 		ObservedAt:      time.Now().UTC(),
 		AssetID:         asset,
 		ReqID:           new(big.Int).Set(raw.ReqId),
@@ -182,7 +182,7 @@ func (p *Parser) parseAssetRegistered(log types.Log) (*models.Event, error) {
 		TxHash:          log.TxHash,
 		BlockHash:       log.BlockHash,
 		BlockNumber:     log.BlockNumber,
-		LogIndex:        uint32(log.Index), //nolint:gosec
+		LogIndex:        uint32(log.Index), //nolint:gosec // log index per block is bounded by gas limit; never exceeds uint32.
 		ObservedAt:      time.Now().UTC(),
 		AssetID:         asset,
 		AssetRegistered: &models.AssetRegisteredPayload{

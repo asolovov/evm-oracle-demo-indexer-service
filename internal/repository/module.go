@@ -70,7 +70,7 @@ func (m *Module) Stop(_ context.Context) error {
 // HealthCheck pings the pool.
 func (m *Module) HealthCheck(ctx context.Context) error {
 	if m.pool == nil {
-		return fmt.Errorf("repository module not initialised")
+		return fmt.Errorf("repository module not initialized")
 	}
 	return m.pool.Ping(ctx)
 }

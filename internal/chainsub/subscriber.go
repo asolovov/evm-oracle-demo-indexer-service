@@ -35,7 +35,7 @@ type Metrics interface {
 }
 
 // Subscriber owns the WS subscription to the chain. It is a single-
-// goroutine consumer: Run() blocks until ctx is cancelled.
+// goroutine consumer: Run() blocks until ctx is canceled.
 type Subscriber struct {
 	wsURL          string
 	rpcURL         string
@@ -174,20 +174,19 @@ func (s *Subscriber) runOnce(ctx context.Context) error {
 
 func (s *Subscriber) handleLog(ctx context.Context, rpc *ethclient.Client, log types.Log) error {
 	evt, err := s.parser.Parse(log)
-	if err != nil {
-		if errors.Is(err, ErrUnknownEvent) {
-			return nil // not a log we care about (e.g. Ownable*)
-		}
+	switch {
+	case errors.Is(err, ErrUnknownEvent):
+		return nil // not a log we care about (e.g. Ownable*)
+	case errors.Is(err, ErrAssetIDUnknown):
+		// Warning, not fatal — the parser still returned a usable event
+		// (with empty asset_id) so we persist + log.
+		logger.Log().Warnf("chainsub: aggregator %s emitted %s but is not in registry mapping",
+			log.Address.Hex(), evt.Kind)
+	case err != nil:
 		if s.metrics != nil {
 			s.metrics.ObserveDecodeError()
 		}
 		return fmt.Errorf("parse log (tx=%s idx=%d): %w", log.TxHash.Hex(), log.Index, err)
-	}
-
-	// AssetID-unknown is a warning, not a fatal — we still persist.
-	if err != nil && errors.Is(err, ErrAssetIDUnknown) {
-		logger.Log().Warnf("chainsub: aggregator %s emitted %s but is not in registry mapping",
-			log.Address.Hex(), evt.Kind)
 	}
 
 	// For PriceFulfilled, best-effort backfill round_id at the

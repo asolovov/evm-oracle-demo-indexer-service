@@ -100,7 +100,7 @@ func (m *Module) Stop(ctx context.Context) error {
 // the mux. Module-graph readiness is what /readyz reports.
 func (m *Module) HealthCheck(_ context.Context) error {
 	if m.srv == nil {
-		return errors.New("healthz module not initialised")
+		return errors.New("healthz module not initialized")
 	}
 	return nil
 }
