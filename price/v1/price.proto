@@ -1,0 +1,102 @@
+syntax = "proto3";
+
+package price.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/asolovov/evm-oracle-demo-protocols/price/v1;pricev1";
+
+// PriceService is the off-chain aggregation surface of the oracle.
+// It owns source polling and exposes the latest USD price per asset
+// to internal callers (oracle-service uses it when building
+// `fulfillPrice` payloads; rest-api uses it for the dashboard).
+//
+// Pricing model: prices flow as IEEE-754 doubles end-to-end inside
+// the off-chain pipeline — sources return floats, aggregation runs on
+// floats, the wire format carries doubles. Conversion to the on-chain
+// int256 representation (Chainlink's 8-decimal scale) happens once,
+// inside oracle-service, when it builds the fulfillPrice call. Keep
+// the conversion in one place; do not scatter it across services.
+service PriceService {
+  // GetPrice returns the most recently aggregated price for one asset.
+  // Returns NOT_FOUND if the asset is not tracked.
+  rpc GetPrice(GetPriceRequest) returns (AggregatedPrice);
+
+  // Subscribe streams aggregated prices for the requested assets.
+  // On stream open, the server pushes the current value for each
+  // subscribed asset; thereafter it pushes updates as new
+  // aggregations are produced. The stream stays open until the
+  // client cancels.
+  rpc Subscribe(SubscribeRequest) returns (stream AggregatedPrice);
+}
+
+// GetPriceRequest selects an asset by its canonical id.
+message GetPriceRequest {
+  // Canonical asset id: lowercase symbol used as the bytes32 key on
+  // chain. Examples: "weth", "wbtc", "xau", "spx".
+  string asset_id = 1;
+}
+
+// SubscribeRequest selects one or more assets to stream.
+// An empty asset_ids list is rejected with INVALID_ARGUMENT;
+// callers must opt in explicitly per-asset.
+message SubscribeRequest {
+  // Asset ids to subscribe to. Same id form as GetPriceRequest.
+  repeated string asset_ids = 1;
+}
+
+// AggregatedPrice is the median across the live source set for an
+// asset at a point in time, with the per-source breakdown the
+// dashboard renders.
+message AggregatedPrice {
+  // Canonical asset id (see GetPriceRequest.asset_id).
+  string asset_id = 1;
+
+  // Median across included sources, in USD, as an IEEE-754 double.
+  // Always non-negative.
+  double median_price = 2;
+
+  // Wall-clock time when this aggregation was produced.
+  google.protobuf.Timestamp aggregated_at = 3;
+
+  // Per-source contributions. Includes both sources used in the
+  // median (`included = true`) and sources dropped by the freshness
+  // or deviation guard (`included = false`). Always populated even
+  // if empty — the dashboard renders the full set.
+  repeated SourceContribution sources = 4;
+}
+
+// SourceContribution is the single-source view of an aggregation
+// round — what the price was, how stale it was, and whether the
+// aggregator used it.
+message SourceContribution {
+  // Source discriminator. Stable identifiers chosen at adapter
+  // implementation time: "coingecko", "binance", "uniswap_v3",
+  // "alpha_vantage", "twelve_data", "stooq".
+  string source = 1;
+
+  // Price reported by this source, in USD, as an IEEE-754 double.
+  double price = 2;
+
+  // When price-service retrieved this datum. Bounded by the poller
+  // interval — typically within 30s of `aggregated_at` for crypto,
+  // much wider for RWA.
+  google.protobuf.Timestamp fetched_at = 3;
+
+  // When the upstream reports the price was observed (e.g. Binance
+  // ticker timestamp, Alpha Vantage close-of-bar). May lag
+  // fetched_at by hours for end-of-day RWA series.
+  google.protobuf.Timestamp source_observed_at = 4;
+
+  // Convenience: `now - source_observed_at` in seconds at the time
+  // this message was produced. Surfaced on the dashboard's freshness
+  // badge — clients SHOULD prefer this over recomputing from
+  // timestamps because aggregator and client clocks may drift.
+  int64 age_sec = 5;
+
+  // Whether this source contributed to the median. Sources are
+  // excluded on fetch error, schema mismatch, or deviation-guard
+  // rejection. The reason for exclusion is logged server-side; the
+  // wire format only carries the boolean.
+  bool included = 6;
+}
