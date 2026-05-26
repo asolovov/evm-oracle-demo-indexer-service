@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -51,18 +52,18 @@ type Metrics interface {
 // Confirmer ticks every Interval, drains a bounded chunk of pending
 // events, and applies the chain's verdict.
 type Confirmer struct {
-	store       EventStore
-	chain       HeadProvider
-	publisher   Publisher
-	metrics     Metrics
-	threshold   uint32
-	interval    time.Duration
-	batchLimit  int
+	store        EventStore
+	chain        HeadProvider
+	publisher    Publisher
+	metrics      Metrics
+	threshold    uint32
+	interval     time.Duration
+	batchLimit   int
 	headObserver func(uint64)
 
-	running atomic.Bool
-	stop    chan struct{}
-	done    chan struct{}
+	running  atomic.Bool
+	stopOnce sync.Once
+	stop     chan struct{}
 }
 
 // Config bundles the constructor knobs.
@@ -94,6 +95,7 @@ func New(store EventStore, chain HeadProvider, publisher Publisher, cfg Config) 
 		interval:     cfg.Interval,
 		batchLimit:   cfg.BatchLimit,
 		headObserver: cfg.HeadObserver,
+		stop:         make(chan struct{}),
 	}
 }
 
@@ -106,17 +108,18 @@ func (c *Confirmer) Run(ctx context.Context) error {
 	}
 	defer c.running.Store(false)
 
-	c.stop = make(chan struct{})
-	c.done = make(chan struct{})
-	defer close(c.done)
-
 	t := time.NewTicker(c.interval)
 	defer t.Stop()
 
 	// Run an initial tick so a fresh startup doesn't have to wait
-	// `interval` seconds before draining the backlog.
-	if err := c.Tick(ctx); err != nil && !errors.Is(err, context.Canceled) {
-		return fmt.Errorf("initial tick: %w", err)
+	// `interval` seconds before draining the backlog. Errors here
+	// are transient by design — the loop below will retry on the
+	// next tick.
+	if err := c.Tick(ctx); err != nil {
+		if errors.Is(err, context.Canceled) {
+			return nil
+		}
+		_ = err
 	}
 
 	for {
@@ -138,15 +141,10 @@ func (c *Confirmer) Run(ctx context.Context) error {
 	}
 }
 
-// Stop signals Run to return. Safe to call before Run.
+// Stop signals Run to return. Safe to call before Run; idempotent
+// across repeated calls.
 func (c *Confirmer) Stop() {
-	if c.stop != nil {
-		select {
-		case <-c.stop:
-		default:
-			close(c.stop)
-		}
-	}
+	c.stopOnce.Do(func() { close(c.stop) })
 }
 
 // Tick runs one drain cycle. Exported for tests + the initial pass at

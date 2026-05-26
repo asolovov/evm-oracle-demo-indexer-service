@@ -6,6 +6,7 @@ import (
 	"math/big"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -295,5 +296,91 @@ func TestRun_ContextCancelExits(t *testing.T) {
 	cancel()
 	if err := c.Run(ctx); err != nil {
 		t.Errorf("Run returned %v, want nil after context cancel", err)
+	}
+}
+
+type stubChainErrHead struct{}
+
+func (stubChainErrHead) HeaderByNumber(_ context.Context, _ *big.Int) (*types.Header, error) {
+	return nil, errors.New("rpc dead")
+}
+func (stubChainErrHead) HeaderByHash(_ context.Context, _ common.Hash) (*types.Header, error) {
+	return nil, errors.New("rpc dead")
+}
+
+func TestTick_PropagatesHeadLookupError(t *testing.T) {
+	c := New(newFakeStore(), stubChainErrHead{}, &fakePublisher{}, Config{Threshold: 5})
+	if err := c.Tick(context.Background()); err == nil {
+		t.Error("expected head-lookup error to propagate from Tick")
+	}
+}
+
+func TestRun_RecoversFromTickError(t *testing.T) {
+	// Run() must not exit on a transient Tick error — it logs + waits
+	// for the next tick. Use a tiny interval so we get multiple ticks
+	// inside the 200ms window.
+	c := New(newFakeStore(), stubChainErrHead{}, &fakePublisher{}, Config{Threshold: 5, Interval: 20 * time.Millisecond})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	if err := c.Run(ctx); err != nil {
+		t.Errorf("Run returned %v, want nil on persistent transient errors", err)
+	}
+}
+
+func TestRun_StopExits(t *testing.T) {
+	canonical100 := makeHeader(100, 0)
+	chain := &fakeChain{
+		head: 102,
+		headers: map[uint64]*types.Header{
+			102: makeHeader(102, 0),
+			100: canonical100,
+		},
+	}
+	c := New(newFakeStore(), chain, &fakePublisher{}, Config{Threshold: 5, Interval: time.Second})
+
+	done := make(chan error, 1)
+	go func() { done <- c.Run(context.Background()) }()
+
+	// Give Run a moment to start.
+	time.Sleep(50 * time.Millisecond)
+	c.Stop()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("Run returned %v, want nil after Stop", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not exit within 2s of Stop")
+	}
+}
+
+func TestRun_RefusesConcurrent(t *testing.T) {
+	canonical100 := makeHeader(100, 0)
+	chain := &fakeChain{
+		head:    102,
+		headers: map[uint64]*types.Header{102: makeHeader(102, 0), 100: canonical100},
+	}
+	c := New(newFakeStore(), chain, &fakePublisher{}, Config{Threshold: 5, Interval: time.Second})
+
+	first := make(chan struct{})
+	go func() {
+		close(first)
+		_ = c.Run(context.Background())
+	}()
+	<-first
+	time.Sleep(50 * time.Millisecond)
+
+	if err := c.Run(context.Background()); err == nil {
+		t.Error("second Run should refuse to start concurrently")
+	}
+	c.Stop()
+}
+
+func TestNew_DefaultsApplied(t *testing.T) {
+	c := New(newFakeStore(), stubChainErrHead{}, &fakePublisher{}, Config{})
+	if c.threshold != 5 || c.interval != 10*time.Second || c.batchLimit != 500 {
+		t.Errorf("defaults missing: threshold=%d interval=%v batchLimit=%d", c.threshold, c.interval, c.batchLimit)
 	}
 }

@@ -121,6 +121,13 @@ build: proto-gen
 test:
 	go test ./...
 
+# Integration tests require Docker (testcontainers spawns a Postgres
+# container per test). Gated behind a build tag so `make test` stays
+# hermetic and offline-runnable.
+.PHONY: test-integration
+test-integration:
+	go test -tags=integration -count=1 ./...
+
 .PHONY: test-with-gen
 test-with-gen: proto-gen test
 
