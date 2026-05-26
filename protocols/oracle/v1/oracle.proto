@@ -1,0 +1,131 @@
+syntax = "proto3";
+
+package oracle.v1;
+
+import "common/v1/pagination.proto";
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/asolovov/evm-oracle-demo-protocols/oracle/v1;oraclev1";
+
+// OracleService is the signing + on-chain submission surface of the
+// oracle pipeline. Its gRPC surface is admin + read only — there is
+// no `TriggerUpdate` RPC.
+//
+// Trigger model: oracle-service is a long-lived client of
+// `indexer.StreamEvents` with `kinds=[EVENT_KIND_PRICE_REQUESTED]`.
+// Each event delivered on that stream is already past-confirmations,
+// reorg-handled, and idempotency-keyed by `req_id`. The stream IS
+// the trigger; no separate RPC is needed.
+//
+// Heartbeat updates are produced by an oracle-internal scheduler;
+// they do not enter via gRPC either. Operators reconfigure the
+// heartbeat schedule with SetHeartbeat below.
+service OracleService {
+  // SetHeartbeat — admin: configure the per-asset heartbeat schedule.
+  // Persisted; survives service restart.
+  rpc SetHeartbeat(SetHeartbeatRequest) returns (SetHeartbeatResponse);
+
+  // GetSubmissionStatus — read: status of a specific submission,
+  // looked up either by req_id (consumer-issued requests) or by
+  // tx_hash (heartbeat submissions, where req_id = "0").
+  rpc GetSubmissionStatus(GetSubmissionStatusRequest) returns (SubmissionStatus);
+
+  // ListSubmissions — read: paginated submission history for the
+  // dashboard and for debugging.
+  rpc ListSubmissions(ListSubmissionsRequest) returns (ListSubmissionsResponse);
+}
+
+// SetHeartbeatRequest reconfigures the heartbeat for one asset.
+message SetHeartbeatRequest {
+  string asset_id = 1;
+
+  // Heartbeat interval in seconds. 0 disables the heartbeat for
+  // this asset.
+  uint32 interval_sec = 2;
+
+  // Deviation threshold in basis points (1 bp = 0.01%). If the
+  // newly aggregated price has moved by at least this much since
+  // the last on-chain price, a heartbeat fires regardless of
+  // `interval_sec`. 0 disables the deviation-based path; the
+  // heartbeat then runs strictly on the time schedule.
+  uint32 deviation_bps = 3;
+}
+
+// SetHeartbeatResponse is intentionally empty — the configuration
+// is keyed by asset_id and idempotent on replay.
+message SetHeartbeatResponse {}
+
+// GetSubmissionStatusRequest selects a submission by exactly one of
+// req_id or tx_hash. Sending both, or neither, is rejected with
+// INVALID_ARGUMENT.
+message GetSubmissionStatusRequest {
+  // uint256 as base-10 decimal string. Empty when querying by
+  // tx_hash. "0" is reserved for heartbeat submissions and cannot
+  // be looked up here — use tx_hash for those.
+  string req_id = 1;
+
+  // 32-byte tx hash, 0x-prefixed lowercase hex. Empty when querying
+  // by req_id.
+  string tx_hash = 2;
+}
+
+// SubmissionStatus is the lifecycle of one `fulfillPrice` tx.
+message SubmissionStatus {
+  enum Status {
+    STATUS_UNSPECIFIED = 0;
+    // Tx built and signed but not yet broadcast, or broadcast and
+    // still in the mempool.
+    STATUS_PENDING = 1;
+    // Mined and included with status=1 (success).
+    STATUS_CONFIRMED = 2;
+    // Mined and reverted, or rejected pre-broadcast (e.g. bad
+    // nonce, signature verification failure).
+    STATUS_FAILED = 3;
+    // Dropped from the mempool by the node without ever being
+    // mined. After 3 replace-by-fee retries we give up and mark
+    // dropped.
+    STATUS_DROPPED = 4;
+  }
+
+  // uint256 as base-10 decimal string. "0" for heartbeat
+  // submissions (no consumer request behind them).
+  string req_id = 1;
+
+  // Canonical asset id (matches PriceService.asset_id form).
+  string asset_id = 2;
+
+  // 32-byte tx hash, 0x-prefixed lowercase hex. Empty while
+  // STATUS_PENDING and the tx has not yet been broadcast.
+  string tx_hash = 3;
+
+  // int256 as base-10 decimal string in Chainlink's 8-decimal
+  // scale (e.g. "345020000000" represents a USD price of 3450.20).
+  // Empty until the price has been signed.
+  string submitted_price = 4;
+
+  // When the tx was first broadcast (or rebroadcast after replace).
+  // Server-set; never trust client clocks here.
+  google.protobuf.Timestamp submitted_at = 5;
+
+  Status status = 6;
+
+  // Number of replace-by-fee attempts so far. 0 means the tx was
+  // broadcast once and not bumped.
+  uint32 retry_count = 7;
+
+  // Free-form error text from the last failed broadcast or revert.
+  // Empty unless STATUS_FAILED or a retry happened.
+  string last_error = 8;
+}
+
+// ListSubmissionsRequest pages over submissions in descending
+// submitted_at order. `asset_id` is an optional exact-match filter.
+message ListSubmissionsRequest {
+  string asset_id = 1;
+  common.v1.PageRequest page = 2;
+}
+
+message ListSubmissionsResponse {
+  repeated SubmissionStatus submissions = 1;
+  common.v1.PageResponse page = 2;
+}

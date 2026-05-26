@@ -1,0 +1,53 @@
+syntax = "proto3";
+
+package common.v1;
+
+option go_package = "github.com/asolovov/evm-oracle-demo-protocols/common/v1;commonv1";
+
+// PageRequest represents offset/limit pagination parameters.
+// Use this for traditional page-based pagination.
+message PageRequest {
+  // Page number (1-indexed). First page is 1.
+  int32 page = 1;
+  
+  // Number of items per page. Maximum should be enforced by service.
+  int32 page_size = 2;
+}
+
+// PageResponse contains metadata about paginated results.
+// Include this in list responses when using PageRequest.
+message PageResponse {
+  // Total number of items across all pages.
+  int32 total_count = 1;
+  
+  // Current page number (1-indexed).
+  int32 page = 2;
+  
+  // Number of items per page.
+  int32 page_size = 3;
+  
+  // Total number of pages available.
+  int32 total_pages = 4;
+}
+
+// CursorPageRequest represents cursor-based pagination parameters.
+// Use this for efficient pagination of large datasets or real-time data.
+message CursorPageRequest {
+  // Opaque cursor string from previous response.
+  // Empty string for first page.
+  string cursor = 1;
+  
+  // Maximum number of items to return.
+  int32 limit = 2;
+}
+
+// CursorPageResponse contains cursor pagination metadata.
+// Include this in list responses when using CursorPageRequest.
+message CursorPageResponse {
+  // Cursor for fetching the next page.
+  // Empty if no more pages available.
+  string next_cursor = 1;
+  
+  // Indicates if more results are available.
+  bool has_more = 2;
+}
