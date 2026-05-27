@@ -12,6 +12,13 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
+# All third-party actions are SHA-pinned per Gateway org policy + NFR-07.
+env:
+  GO_VERSION: "1.25"
+  BUF_VERSION: "v1.55.0"
+  PROTOC_GEN_GO_VERSION: "v1.36.0"
+  PROTOC_GEN_GO_GRPC_VERSION: "v1.5.1"
+
 jobs:
   prepare:
     runs-on: ubuntu-latest
@@ -19,7 +26,7 @@ jobs:
       next_tag: ${{ steps.next_tag.outputs.next_tag }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
 
@@ -29,12 +36,12 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
-          go-version: "1.24"
+          go-version: ${{ env.GO_VERSION }}
 
       - name: Cache Go modules
-        uses: actions/cache@v4
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
         with:
           path: |
             ~/.cache/go-build
@@ -46,34 +53,25 @@ jobs:
       - name: Install dependencies
         run: go mod download
 
-      - name: Install protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Install buf + protoc plugins (pinned)
+        run: |
+          go install github.com/bufbuild/buf/cmd/buf@${{ env.BUF_VERSION }}
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@${{ env.PROTOC_GEN_GO_VERSION }}
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@${{ env.PROTOC_GEN_GO_GRPC_VERSION }}
 
-      - name: Install proto tools
-        run: make proto-install
+      - name: Generate Go stubs from ./protocols
+        run: make proto-gen
 
-      - name: Generate protos
-        run: make proto-generate-all
+      - name: Lint
+        uses: golangci/golangci-lint-action@1b6671e713fd51c7f28eb88acf29c9bf3c2eb15f # v6.5.0
+        with:
+          version: v2.11.4
+          args: --timeout=5m
 
-      - name: Install golangci-lint
-        run: make lint-install
-
-      - name: Install go-swagger
-        run: make swagger-install
-
-      - name: Validate Swagger spec
-        run: make swagger-validate
-
-      - name: Generate API code
-        run: make generate-api
-
-      - name: Run CI checks (lint)
-        run: make lint
-
-      - name: Run CI checks (test)
+      - name: Test
         run: make test
 
-      - name: Run CI checks (build)
+      - name: Build
         run: make build
 
       - name: Determine next tag (semantic)
@@ -134,12 +132,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
 
       - name: Create GitHub release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@c95fe1489396fe8a9eb87c0abf8aa5b2ef267fda # v2.2.1
         with:
           tag_name: ${{ needs.prepare.outputs.next_tag }}
           generate_release_notes: true
