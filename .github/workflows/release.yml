@@ -63,10 +63,9 @@ jobs:
         run: make proto-gen
 
       - name: Lint
-        uses: golangci/golangci-lint-action@1b6671e713fd51c7f28eb88acf29c9bf3c2eb15f # v6.5.0
+        uses: golangci/golangci-lint-action@db582008a42febd596419635a5abc9d9815daa9c # v9.2.1
         with:
           version: v2.11.4
-          args: --timeout=5m
 
       - name: Test
         run: make test
