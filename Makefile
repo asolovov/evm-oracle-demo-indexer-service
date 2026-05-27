@@ -172,8 +172,29 @@ lint-install:
 
 # Protobuf configuration
 PROTO_DIR := ./protocols
-PROTO_REPO ?= https://github.com/andskur/protocols-template.git
+PROTO_REPO ?= https://github.com/asolovov/evm-oracle-demo-protocols.git
 PROTO_BRANCH ?= main
+
+# Abigen regeneration. The .abi.json files under pkg/contracts/<name>/ are
+# Hardhat artifact wrappers (mirrored from
+# evm-oracle-demo-contracts/main/deployments/ethereum-sepolia/abis/).
+# Abigen wants the unwrapped ABI array, so this target extracts it via
+# python, runs abigen, then deletes the intermediate.
+#
+# Bindings are committed (architecture rule 5 exception) — only re-run
+# when the deployed contract ABIs change.
+ABIGEN ?= abigen
+.PHONY: abigen
+abigen:
+	@which $(ABIGEN) > /dev/null || (echo "Error: abigen not installed. Run: go install github.com/ethereum/go-ethereum/cmd/abigen@v1.17.3" && exit 1)
+	@for c in oracleregistry/OracleRegistry priceaggregator/PriceAggregator reporterset/ReporterSet; do \
+		pkg=$$(dirname $$c); type=$$(basename $$c); \
+		echo "abigen pkg=$$pkg type=$$type"; \
+		python3 -c "import json,sys; print(json.dumps(json.load(open('pkg/contracts/'+'$$c'+'.abi.json'))['abi']))" > pkg/contracts/$$c.abi.tmp && \
+		$(ABIGEN) --abi pkg/contracts/$$c.abi.tmp --pkg $$pkg --type $$type --out pkg/contracts/$$pkg/contract.go && \
+		rm pkg/contracts/$$c.abi.tmp; \
+	done
+	@echo "abigen regeneration complete"
 
 .PHONY: proto-install
 proto-install:
