@@ -1,14 +1,14 @@
 # Set APP to the name of the application
-APP:=microservice-template
+APP:=evm-oracle-demo-indexer-service
 
 # Set APP_ENTRY_POINT to the main Go file for the application
-APP_ENTRY_POINT:=cmd/microservice-template.go
+APP_ENTRY_POINT:=cmd/evm-oracle-demo-indexer-service.go
 
 # Set BUILD_OUT_DIR to the directory where the built executable should be placed
 BUILD_OUT_DIR:=./
 
 # path to version package
-GITVER_PKG:=microservice-template/pkg/version
+GITVER_PKG:=github.com/asolovov/evm-oracle-demo-indexer-service/pkg/version
 
 # Set GOOS and GOARCH to the current system values using the go env command
 GOOS=$(shell go env GOOS)
@@ -112,16 +112,24 @@ migrate-drop:
 run:
 	GODEBUG=xray_ptrace=1 go run -race $(APP_ENTRY_POINT) serve
 
-# The build target builds the application for the current system
-build:
+# The build target builds the application for the current system.
+# Depends on proto-gen so a fresh clone compiles without manual codegen.
+build: proto-gen
 	env CGO_ENABLED=0 GOOS=$(GOOS) GOARCH=$(GOARCH) go build -ldflags="-w -s ${LDFLAGS}" -o $(BUILD_OUT_DIR)/$(APP) $(APP_ENTRY_POINT)
 
 # The test target runs go test
 test:
 	go test ./...
 
+# Integration tests require Docker (testcontainers spawns a Postgres
+# container per test). Gated behind a build tag so `make test` stays
+# hermetic and offline-runnable.
+.PHONY: test-integration
+test-integration:
+	go test -tags=integration -count=1 ./...
+
 .PHONY: test-with-gen
-test-with-gen: generate-all test
+test-with-gen: proto-gen test
 
 # gRPC integration tests (runs only gRPC package tests, including integration)
 .PHONY: test-grpc
@@ -156,7 +164,7 @@ lint:
 	golangci-lint run ./...
 
 .PHONY: lint-with-gen
-lint-with-gen: generate-all lint
+lint-with-gen: proto-gen lint
 
 # The lint-install target installs golangci-lint if not already installed
 lint-install:
@@ -164,8 +172,29 @@ lint-install:
 
 # Protobuf configuration
 PROTO_DIR := ./protocols
-PROTO_REPO ?= https://github.com/andskur/protocols-template.git
+PROTO_REPO ?= https://github.com/asolovov/evm-oracle-demo-protocols.git
 PROTO_BRANCH ?= main
+
+# Abigen regeneration. The .abi.json files under pkg/contracts/<name>/ are
+# Hardhat artifact wrappers (mirrored from
+# evm-oracle-demo-contracts/main/deployments/ethereum-sepolia/abis/).
+# Abigen wants the unwrapped ABI array, so this target extracts it via
+# python, runs abigen, then deletes the intermediate.
+#
+# Bindings are committed (architecture rule 5 exception) — only re-run
+# when the deployed contract ABIs change.
+ABIGEN ?= abigen
+.PHONY: abigen
+abigen:
+	@which $(ABIGEN) > /dev/null || (echo "Error: abigen not installed. Run: go install github.com/ethereum/go-ethereum/cmd/abigen@v1.17.3" && exit 1)
+	@for c in oracleregistry/OracleRegistry priceaggregator/PriceAggregator reporterset/ReporterSet; do \
+		pkg=$$(dirname $$c); type=$$(basename $$c); \
+		echo "abigen pkg=$$pkg type=$$type"; \
+		python3 -c "import json,sys; print(json.dumps(json.load(open('pkg/contracts/'+'$$c'+'.abi.json'))['abi']))" > pkg/contracts/$$c.abi.tmp && \
+		$(ABIGEN) --abi pkg/contracts/$$c.abi.tmp --pkg $$pkg --type $$type --out pkg/contracts/$$pkg/contract.go && \
+		rm pkg/contracts/$$c.abi.tmp; \
+	done
+	@echo "abigen regeneration complete"
 
 .PHONY: proto-install
 proto-install:
@@ -198,37 +227,25 @@ proto-update:
 	@git subtree pull --prefix=$(PROTO_DIR) $(PROTO_REPO) $(PROTO_BRANCH) --squash
 	@echo "Subtree updated successfully"
 
-.PHONY: proto-generate
-proto-generate:
-ifndef PROTO_PACKAGE
-	@echo "Error: PROTO_PACKAGE parameter is required"
-	@echo "Usage: make proto-generate PROTO_PACKAGE=user"
-	@echo "This will generate Go code from $(PROTO_DIR)/user/*.proto"
-	@exit 1
-endif
-	@test -d $(PROTO_DIR)/$(PROTO_PACKAGE) || (echo "Error: $(PROTO_DIR)/$(PROTO_PACKAGE) directory not found" && exit 1)
-	@echo "Generating Go code from $(PROTO_DIR)/$(PROTO_PACKAGE)/*.proto..."
-	@cd $(PROTO_DIR)/$(PROTO_PACKAGE) && \
-		protoc --go_out=paths=source_relative:. \
-		       --go_opt=paths=source_relative \
-		       --go-grpc_out=paths=source_relative:. \
-		       --go-grpc_opt=paths=source_relative \
-		       *.proto
-	@echo "Proto generation complete for $(PROTO_PACKAGE)"
+# Service-owned proto codegen. Reads `buf.gen.yaml` at repo root, writes
+# stubs into `internal/genproto/` retargeted at this service's module path
+# (architecture rule 9 — generated code is consumer-side, never lives in
+# the protocols subtree and is never committed).
+.PHONY: proto-gen
+proto-gen:
+	@test -d $(PROTO_DIR) || (echo "Error: $(PROTO_DIR) subtree not found" && exit 1)
+	@test -f buf.gen.yaml || (echo "Error: buf.gen.yaml not found at repo root" && exit 1)
+	@which buf > /dev/null || (echo "Error: buf not installed. Run 'make buf-install'" && exit 1)
+	@mkdir -p internal/genproto
+	@echo "Generating Go stubs from $(PROTO_DIR)/ into internal/genproto/..."
+	@buf generate $(PROTO_DIR)
+	@echo "Proto generation complete"
 
-.PHONY: proto-generate-all
-proto-generate-all:
-	@test -d $(PROTO_DIR) || (echo "Error: $(PROTO_DIR) directory not found" && exit 1)
-	@echo "Generating Go code from all proto packages under $(PROTO_DIR)..."
-	@cd $(PROTO_DIR) && find . -type f -name '*.proto' -print0 | xargs -0 -n1 dirname | sort -u | while read -r dir; do \
-		cd "$$dir" && \
-		protoc --go_out=paths=source_relative:. \
-		       --go_opt=paths=source_relative \
-		       --go-grpc_out=paths=source_relative:. \
-		       --go-grpc_opt=paths=source_relative \
-		       *.proto; \
-	done
-	@echo "Proto generation complete for all packages"
+.PHONY: proto-clean-gen
+proto-clean-gen:
+	@echo "Removing generated proto outputs under internal/genproto/..."
+	@rm -rf internal/genproto/*
+	@echo "Done"
 
 .PHONY: buf-lint
 buf-lint:
@@ -240,77 +257,15 @@ buf-breaking:
 	@test -d $(PROTO_DIR) || (echo "Error: $(PROTO_DIR) directory not found" && exit 1)
 	@cd $(PROTO_DIR) && buf breaking --against '.git#branch=main'
 
-.PHONY: buf-generate
-buf-generate:
-ifndef PROTO_PACKAGE
-	@echo "Error: PROTO_PACKAGE parameter is required"
-	@echo "Usage: make buf-generate PROTO_PACKAGE=user"
-	@exit 1
-endif
-	@test -d $(PROTO_DIR)/$(PROTO_PACKAGE) || (echo "Error: $(PROTO_DIR)/$(PROTO_PACKAGE) directory not found" && exit 1)
-	@cd $(PROTO_DIR)/$(PROTO_PACKAGE) && buf generate
-	@echo "Buf generation complete for $(PROTO_PACKAGE)"
-
+# `buf-generate-all` is a legacy alias for `proto-gen` so older docs /
+# scripts keep working.
 .PHONY: buf-generate-all
-buf-generate-all:
-	@test -d $(PROTO_DIR) || (echo "Error: $(PROTO_DIR) directory not found" && exit 1)
-	@cd $(PROTO_DIR) && buf generate
-	@echo "Buf generation complete for all packages"
+buf-generate-all: proto-gen
 
-.PHONY: buf-validate
-buf-validate:
-	@test -d $(PROTO_DIR) || (echo "Error: $(PROTO_DIR) directory not found" && exit 1)
-	@cd $(PROTO_DIR) && buf lint && buf generate --template buf.gen.yaml --path . >/dev/null
-
-.PHONY: proto-clean
-proto-clean:
-	@echo "Cleaning generated proto files..."
-	@find $(PROTO_DIR) -name "*.pb.go" -type f -delete
-	@find $(PROTO_DIR) -name "*_grpc.pb.go" -type f -delete
-	@echo "Generated proto files removed"
-
-# Swagger/HTTP API targets
-.PHONY: swagger-install
-swagger-install:
-	@which swagger > /dev/null || (echo "Installing go-swagger..." && go install github.com/go-swagger/go-swagger/cmd/swagger@latest)
-	@echo "go-swagger installed successfully"
-
-.PHONY: swagger-validate
-swagger-validate:
-	@echo "Validating swagger specification..."
-	@swagger validate api/swagger.yaml
-	@echo "Swagger spec is valid"
-
-.PHONY: generate-api
-generate-api:
-	@echo "Generating API server from swagger spec..."
-	@swagger generate server \
-		-A $(APP)-api \
-		-P models.User \
-		--server-package server \
-		-f ./api/swagger.yaml \
-		--exclude-main \
-		--keep-spec-order \
-		--flag-strategy pflag \
-		--target ./internal/http \
-		--spec ./api/swagger.yaml
-	@echo "Tidying go modules..."
-	@go mod tidy
-	@echo "API generation complete"
-
+# Aggregate codegen entrypoint. Currently only protobuf — this rig has
+# no HTTP/swagger surface.
 .PHONY: generate-all
-generate-all: proto-generate-all generate-api
-
-.PHONY: swagger-clean
-swagger-clean:
-	@echo "Cleaning generated swagger code..."
-	@rm -rf internal/http/server
-	@echo "Generated swagger code removed"
-
-.PHONY: test-http
-test-http:
-	@echo "Running HTTP module tests..."
-	@go test -v -race -count=1 ./internal/http/...
+generate-all: proto-gen
 
 # Template synchronization
 TEMPLATE_REMOTE_NAME := template

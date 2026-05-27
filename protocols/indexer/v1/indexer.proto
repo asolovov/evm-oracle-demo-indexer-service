@@ -1,0 +1,226 @@
+syntax = "proto3";
+
+package indexer.v1;
+
+import "common/v1/pagination.proto";
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/asolovov/evm-oracle-demo-protocols/indexer/v1;indexerv1";
+
+// IndexerService is the chain-watching surface of the oracle.
+// It subscribes to PriceAggregator + OracleRegistry events on the
+// single deployed chain, persists them past the configured
+// confirmation depth, exposes a paginated read-side, and serves a
+// long-lived event stream that oracle-service consumes as its
+// trigger source.
+//
+// Single-chain only: every event is from our own deployed
+// contracts, so we type each one explicitly rather than carrying an
+// opaque payload.
+service IndexerService {
+  // ListEvents is a paginated historical query for the dashboard
+  // and the read-side. Filterable by event kind, asset, and block
+  // range. Sorted descending by (block_number, log_index).
+  rpc ListEvents(ListEventsRequest) returns (ListEventsResponse);
+
+  // StreamEvents is a long-lived server stream. It emits events
+  // ONLY after they cross the indexer's confirmation threshold —
+  // consumers do not need to gate on `meta.confirmations`. When
+  // `from_block` is set the server replays history first (in
+  // chronological order), then continues live; when unset, the
+  // stream is live-only.
+  rpc StreamEvents(StreamEventsRequest) returns (stream Event);
+
+  // GetRequest returns the joined view of PriceRequested +
+  // PriceFulfilled by req_id. Returns NOT_FOUND if the indexer has
+  // not observed a PriceRequested with that id yet.
+  rpc GetRequest(GetRequestRequest) returns (RequestStatus);
+}
+
+// EventKind enumerates the contract-emitted events the indexer
+// recognises. Used both as a filter on Stream/ListEvents and as the
+// discriminator that mirrors `Event.payload`.
+enum EventKind {
+  EVENT_KIND_UNSPECIFIED = 0;
+  EVENT_KIND_PRICE_REQUESTED = 1;
+  EVENT_KIND_PRICE_FULFILLED = 2;
+  EVENT_KIND_ASSET_REGISTERED = 3;
+}
+
+// EventMeta carries the chain-derived context for every observed
+// event: where it came from, when we saw it, and how confirmed it
+// is at observation time.
+message EventMeta {
+  // Emitting contract address. 0x-prefixed lowercase hex of the
+  // 20-byte address.
+  string contract_address = 1;
+
+  // 32-byte tx hash, 0x-prefixed lowercase hex.
+  string tx_hash = 2;
+
+  // 32-byte block hash, 0x-prefixed lowercase hex.
+  string block_hash = 3;
+
+  // Block height where the log was emitted.
+  uint64 block_number = 4;
+
+  // Log index within the block (0-based, as reported by the node).
+  uint32 log_index = 5;
+
+  // Wall-clock time at which the indexer observed (decoded +
+  // persisted) this event. NOT the block timestamp.
+  google.protobuf.Timestamp observed_at = 6;
+
+  // Number of blocks built on top of `block_number` at the time
+  // this message was produced. For StreamEvents this is always
+  // ≥ the confirmation threshold; for ListEvents it is whatever
+  // depth the reconciler last recorded.
+  uint32 confirmations = 7;
+}
+
+// PriceRequestedEvent — emitted by PriceAggregator.requestPrice.
+message PriceRequestedEvent {
+  // uint256 as base-10 decimal string.
+  string req_id = 1;
+
+  // bytes32 asset id, 0x-prefixed lowercase hex.
+  string asset_id = 2;
+
+  // 20-byte requester address, 0x-prefixed lowercase hex.
+  string requester = 3;
+}
+
+// PriceFulfilledEvent — emitted by PriceAggregator.fulfillPrice.
+message PriceFulfilledEvent {
+  // uint256 as base-10 decimal string.
+  string req_id = 1;
+
+  // bytes32 asset id, 0x-prefixed lowercase hex.
+  string asset_id = 2;
+
+  // int256 price as base-10 decimal string, in Chainlink's
+  // 8-decimal scale.
+  string price = 3;
+
+  // uint256 contract-emitted seconds-since-epoch as base-10 decimal
+  // string. Kept as a string per the uint256 convention; clients
+  // that need a Timestamp can parse and convert.
+  string timestamp = 4;
+
+  // uint80 round id (Chainlink-style) as base-10 decimal string.
+  string round_id = 5;
+}
+
+// AssetRegisteredEvent — emitted by OracleRegistry.registerAsset.
+message AssetRegisteredEvent {
+  // bytes32 asset id, 0x-prefixed lowercase hex.
+  string asset_id = 1;
+
+  // PriceAggregator contract registered for this asset.
+  // 20-byte address, 0x-prefixed lowercase hex.
+  string aggregator = 2;
+}
+
+// Event is a single observed log with its typed decoded payload.
+// `kind` mirrors which variant of `payload` is set — clients can
+// dispatch on `kind` without unwrapping the oneof.
+message Event {
+  EventMeta meta = 1;
+  EventKind kind = 2;
+
+  oneof payload {
+    PriceRequestedEvent price_requested = 10;
+    PriceFulfilledEvent price_fulfilled = 11;
+    AssetRegisteredEvent asset_registered = 12;
+  }
+}
+
+// ListEventsRequest filters and paginates the persisted event log.
+message ListEventsRequest {
+  // Empty = all kinds. Otherwise the union of the listed kinds.
+  repeated EventKind kinds = 1;
+
+  // Optional asset id filter (bytes32 hex). Applied only to events
+  // that carry an asset_id (PriceRequested, PriceFulfilled,
+  // AssetRegistered).
+  string asset_id = 2;
+
+  // Inclusive lower bound on block number. 0 = no lower bound.
+  uint64 from_block = 3;
+
+  // Inclusive upper bound on block number. 0 = no upper bound.
+  uint64 to_block = 4;
+
+  common.v1.PageRequest page = 5;
+}
+
+message ListEventsResponse {
+  repeated Event events = 1;
+  common.v1.PageResponse page = 2;
+}
+
+// StreamEventsRequest selects which events to receive live.
+message StreamEventsRequest {
+  // Empty = all kinds. Otherwise the union of the listed kinds.
+  repeated EventKind kinds = 1;
+
+  // Optional asset id filter (bytes32 hex). Same semantics as
+  // ListEventsRequest.asset_id.
+  string asset_id = 2;
+
+  // 0 = live-only. > 0 = replay history from this block (inclusive)
+  // in chronological order, then continue live.
+  uint64 from_block = 3;
+}
+
+// GetRequestRequest selects a request by its on-chain id.
+message GetRequestRequest {
+  // uint256 as base-10 decimal string.
+  string req_id = 1;
+}
+
+// RequestStatus is the joined lifecycle of one consumer-issued
+// price request, as observed on chain.
+message RequestStatus {
+  enum Status {
+    STATUS_UNSPECIFIED = 0;
+    // PriceRequested observed; PriceFulfilled has not (yet) been
+    // observed past the confirmation threshold.
+    STATUS_PENDING = 1;
+    // PriceFulfilled observed past the confirmation threshold.
+    STATUS_FULFILLED = 2;
+    // The fulfilling tx reverted or the aggregator emitted a
+    // terminal failure event for this request.
+    STATUS_FAILED = 3;
+  }
+
+  // uint256 as base-10 decimal string.
+  string req_id = 1;
+
+  // bytes32 asset id, 0x-prefixed lowercase hex.
+  string asset_id = 2;
+
+  Status status = 3;
+
+  // 20-byte requester address, 0x-prefixed lowercase hex.
+  string requester = 4;
+
+  // 32-byte tx hash of the PriceRequested tx, 0x-prefixed
+  // lowercase hex.
+  string requested_tx_hash = 5;
+
+  // 32-byte tx hash of the PriceFulfilled tx. Empty unless
+  // STATUS_FULFILLED.
+  string fulfilled_tx_hash = 6;
+
+  // int256 price as base-10 decimal string in Chainlink's
+  // 8-decimal scale. Empty unless STATUS_FULFILLED.
+  string fulfilled_price = 7;
+
+  // Block timestamp of the originating PriceRequested event.
+  google.protobuf.Timestamp requested_at = 8;
+
+  // Block timestamp of the fulfilling tx. Zero unless
+  // STATUS_FULFILLED.
+  google.protobuf.Timestamp fulfilled_at = 9;
+}

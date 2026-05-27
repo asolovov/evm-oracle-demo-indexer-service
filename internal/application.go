@@ -1,44 +1,61 @@
-// Package internal contains the core application wiring.
+// Package internal contains the indexer-service application wiring.
+//
+// Per architecture rules 1 + 2, this is the SINGLE place that
+// constructs and connects modules. cmd/ does CLI + config load only;
+// every component is built here and dependencies are passed in
+// explicitly (no global state, no module self-wiring).
 package internal
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
+	"sync"
 	"syscall"
 	"time"
 
-	"microservice-template/config"
-	grpcmod "microservice-template/internal/grpc"
-	grpcclientmod "microservice-template/internal/grpcclient"
-	httpmod "microservice-template/internal/http"
-	"microservice-template/internal/module"
-	"microservice-template/internal/repository"
-	"microservice-template/internal/service"
-	wsmod "microservice-template/internal/websocket"
-	"microservice-template/pkg/logger"
-	"microservice-template/pkg/version"
+	"github.com/ethereum/go-ethereum/common"
+
+	"github.com/asolovov/evm-oracle-demo-indexer-service/config"
+	"github.com/asolovov/evm-oracle-demo-indexer-service/internal/backfill"
+	"github.com/asolovov/evm-oracle-demo-indexer-service/internal/chainsub"
+	"github.com/asolovov/evm-oracle-demo-indexer-service/internal/confirmer"
+	"github.com/asolovov/evm-oracle-demo-indexer-service/internal/grpcsrv"
+	"github.com/asolovov/evm-oracle-demo-indexer-service/internal/healthz"
+	"github.com/asolovov/evm-oracle-demo-indexer-service/internal/metrics"
+	"github.com/asolovov/evm-oracle-demo-indexer-service/internal/module"
+	"github.com/asolovov/evm-oracle-demo-indexer-service/internal/repository"
+	"github.com/asolovov/evm-oracle-demo-indexer-service/internal/streamhub"
+	"github.com/asolovov/evm-oracle-demo-indexer-service/pkg/logger"
+	"github.com/asolovov/evm-oracle-demo-indexer-service/pkg/version"
 )
 
-// App is the main microservice application instance.
+// App is the indexer-service application.
 type App struct {
 	config  *config.Scheme
 	version *version.Version
 	modules *module.Manager
 
-	// Services (exposed to transports like HTTP/gRPC)
-	// Will be nil if dependent modules (e.g., repository) are not enabled.
-	svc service.IService
+	// Owned subsystems (kept on App so Stop can drain them in the
+	// right order independently of the module.Manager).
+	chainsub  *chainsub.Subscriber
+	confirmer *confirmer.Confirmer
+	backfill  *backfill.Reconciler
+	hub       *streamhub.Hub
+
+	cancelRuntime context.CancelFunc
+	runtimeWG     sync.WaitGroup
 }
 
 // NewApplication creates a new App instance.
-func NewApplication() (app *App, err error) {
+func NewApplication() (*App, error) {
 	ver, err := version.NewVersion()
 	if err != nil {
 		return nil, fmt.Errorf("init app version: %w", err)
 	}
-
 	return &App{
 		config:  &config.Scheme{},
 		version: ver,
@@ -46,175 +63,250 @@ func NewApplication() (app *App, err error) {
 	}, nil
 }
 
-// Init initializes the application and all registered modules.
-func (app *App) Init() error {
-	// Register and initialize modules based on configuration
-	// Note: registerModules handles both registration and initialization
-	// in the correct order to ensure dependencies are available
-	if err := app.registerModules(); err != nil {
-		return fmt.Errorf("register modules: %w", err)
-	}
-
-	return nil
-}
-
-// registerModules registers enabled modules based on configuration.
-// Modules are registered in dependency order:
-// 1. Infrastructure (database, cache, queue).
-// 2. Business logic (repositories, services).
-// 3. Transport (http, grpc).
+// Init constructs and registers every module. Splits cleanly into:
 //
-//nolint:gocyclo // should decompose later
-func (app *App) registerModules() error {
-	// 1. Infrastructure: Repository (database-backed) is optional
-	var repoModule *repository.Module
-	if app.config.Database != nil && app.config.Database.Enabled {
-		logger.Log().Info("database enabled, registering repository module")
-
-		repoModule = repository.NewModule(app.config.Database)
-		app.modules.Register(repoModule)
+//  1. Validate config (fail fast, architecture rule 6).
+//  2. Repository module (Init opens the pgx pool).
+//  3. Build stream hub + confirmer + chainsub + backfill (plain
+//     packages — these are not module.Module instances; their
+//     goroutines are managed by the App's Run/Stop pair).
+//  4. gRPC server module.
+//  5. Healthz module — its readyz walks the module graph.
+func (app *App) Init() error {
+	if err := config.Validate(app.config); err != nil {
+		return fmt.Errorf("config: %w", err)
 	}
 
-	// 2. Infrastructure: gRPC Client for external services (optional)
-	var grpcClientModule *grpcclientmod.Module
-	if app.config.GRPCClient != nil && app.config.GRPCClient.Enabled {
-		logger.Log().Info("grpc_client enabled, registering grpc client module")
+	mts := metrics.New()
 
-		grpcClientModule = grpcclientmod.NewModule(app.config.GRPCClient)
-		app.modules.Register(grpcClientModule)
+	// 1. Repository
+	repoModule := repository.NewModule(app.config.Database)
+	app.modules.Register(repoModule)
+	if err := repoModule.Init(context.Background()); err != nil {
+		return fmt.Errorf("init repository: %w", err)
+	}
+	repo := repoModule.Repository()
+
+	// 2. Stream hub.
+	app.hub = streamhub.New(app.config.Indexer.StreamSubscriberBuffer, mts.HubDrop())
+
+	// 3. Chain subscriber (does NOT dial yet; Run() dials on first
+	//    iteration). Confirmer + Backfill use the subscriber's
+	//    *ethclient.Client after Run() opens it.
+	regAddr := common.HexToAddress(app.config.Chain.RegistryAddress)
+	app.chainsub = chainsub.New(repo, chainsub.Config{
+		WSURL:           app.config.Chain.WSURL,
+		RPCURL:          app.config.Chain.RPCURL,
+		RegistryAddress: regAddr,
+		ReconnectWait:   2 * time.Second,
+		Metrics:         metrics.Chainsub{R: mts},
+	})
+
+	// 4. gRPC server.
+	srv := grpcsrv.New(app.config.GRPC, repo, app.hub, app.config.Indexer.Confirmations)
+	app.modules.Register(grpcsrv.NewModule(srv))
+
+	// 5. Healthz.
+	authorMeta := map[string]string{
+		"version": app.version.String(),
+		"name":    "evm-oracle-demo-indexer-service",
+		"chain":   app.config.Chain.Name,
+	}
+	hz := healthz.NewModule(app.config.Healthz, &readyAdapter{m: app.modules}, mts.Handler(), authorMeta)
+	app.modules.Register(hz)
+	if err := hz.Init(context.Background()); err != nil {
+		return fmt.Errorf("init healthz: %w", err)
 	}
 
-	// 3. Business logic: Service module is always registered; repository may be nil
-	logger.Log().Info("registering service module")
-
-	// Pass repository module as provider; service will retrieve repository during Init
-	// (after repository module has been initialized).
-	// Explicitly pass nil to avoid typed nil interface gotcha.
-	var repoProvider service.RepositoryProvider
-	if repoModule != nil {
-		repoProvider = repoModule
-	}
-	svcModule := service.NewModule(repoProvider)
-	app.modules.Register(svcModule)
-
-	// Initialize infrastructure and business logic modules first
-	// so we can retrieve the service instance for transport modules
-	ctx := context.Background()
-	if repoModule != nil {
-		if err := repoModule.Init(ctx); err != nil {
-			return fmt.Errorf("init repository module: %w", err)
-		}
-	}
-	if grpcClientModule != nil {
-		if err := grpcClientModule.Init(ctx); err != nil {
-			return fmt.Errorf("init grpc client module: %w", err)
-		}
-	}
-	if err := svcModule.Init(ctx); err != nil {
-		return fmt.Errorf("init service module: %w", err)
-	}
-
-	// Capture service instance after initialization
-	app.svc = svcModule.Service()
-
-	logger.Log().Info("infrastructure modules initialized successfully")
-
-	// 4. Transport: HTTP module (optional) - receives both service AND grpcClient
-	if app.config.HTTP != nil && app.config.HTTP.Enabled {
-		logger.Log().Info("http enabled, registering http module")
-
-		// Pass grpcClient to HTTP module (can be nil)
-		httpModule := httpmod.NewModule(app.config.HTTP, app.svc, grpcClientModule)
-		app.modules.Register(httpModule)
-
-		// Initialize HTTP module
-		if err := httpModule.Init(ctx); err != nil {
-			return fmt.Errorf("init http module: %w", err)
-		}
-	}
-
-	// 5. Transport: gRPC server module (optional)
-	if app.config.GRPC != nil && app.config.GRPC.Enabled {
-		logger.Log().Info("grpc enabled, registering grpc module")
-
-		grpcModule := grpcmod.NewModule(app.config.GRPC, app.svc)
-		app.modules.Register(grpcModule)
-
-		// Initialize gRPC module
-		if err := grpcModule.Init(ctx); err != nil {
-			return fmt.Errorf("init grpc module: %w", err)
-		}
-	}
-
-	// 6. Transport: WebSocket server module (optional)
-	if app.config.WebSocket != nil && app.config.WebSocket.Enabled {
-		logger.Log().Info("websocket enabled, registering websocket module")
-
-		wsModule := wsmod.NewModule(app.config.WebSocket, app.svc)
-		app.modules.Register(wsModule)
-
-		// Initialize WebSocket module
-		if err := wsModule.Init(ctx); err != nil {
-			return fmt.Errorf("init websocket module: %w", err)
-		}
-	}
-
-	logger.Log().Infof("registered and initialized %d modules", app.modules.Count())
+	app.runtime(mts)
 	return nil
 }
 
-// Serve starts all modules and waits for shutdown signal.
-func (app *App) Serve() error {
-	ctx := context.Background()
+// runtime captures the metrics surface for the background goroutines
+// that Run() will launch in Serve().
+func (app *App) runtime(mts *metrics.Registry) {
+	app.confirmer = confirmer.New(nil, nil, app.hub, confirmer.Config{
+		Threshold:  app.config.Indexer.Confirmations,
+		Interval:   time.Duration(app.config.Indexer.ReorgCheckIntervalSec) * time.Second,
+		BatchLimit: 500,
+		Metrics:    metrics.Confirmer{R: mts},
+	})
+	// repo + chain client get injected at Serve time after the
+	// chainsub goroutine dials.
 
-	// Start all modules
-	if err := app.modules.StartAll(ctx); err != nil {
+	_ = mts // metrics registry is captured by every collector already.
+}
+
+// Serve starts everything in order. Returns when a signal terminates
+// the process or the runtime goroutines exit.
+//
+// Lifecycle:
+//
+//   - chainsub.Run goroutine: dials WS+RPC, drains logs into the
+//     repo, maintains the aggregator->asset mapping.
+//   - backfill (one-shot): waits for chainsub to dial, then runs
+//     the gap-fill pass against the same RPC client.
+//   - confirmer.Run goroutine: ticks every reorg_check_interval_sec.
+//   - module.Manager.StartAll: brings up the gRPC server + healthz.
+func (app *App) Serve() error {
+	//nolint:gosec // cancel is stored in app.cancelRuntime and explicitly invoked from app.Stop; deferring here would terminate the runtime as soon as Serve returns (defeating the long-running design).
+	runtimeCtx, cancel := context.WithCancel(context.Background())
+	app.cancelRuntime = cancel
+
+	// chainsub
+	app.runtimeWG.Add(1)
+	go func() {
+		defer app.runtimeWG.Done()
+		if err := app.chainsub.Run(runtimeCtx); err != nil {
+			logger.Log().Errorf("chainsub.Run: %v", err)
+		}
+	}()
+
+	// Wait briefly for the chainsub to dial so confirmer + backfill
+	// have a client to share. The first iteration of chainsub.Run
+	// must establish the client before backfill can borrow it; the
+	// gating is best-effort, not perfectly synchronous.
+	app.waitForChainClient(runtimeCtx, 30*time.Second)
+
+	if app.chainsub.Client() == nil {
+		logger.Log().Warn("chainsub never connected; backfill + confirmer running in degraded mode")
+	}
+
+	repoModule := app.findRepository()
+	if repoModule == nil {
+		return errors.New("repository module not registered")
+	}
+	repo := repoModule.Repository()
+
+	// Backfill (one-shot).
+	if app.chainsub.Client() != nil {
+		parser, err := chainsub.NewParser(common.HexToAddress(app.config.Chain.RegistryAddress), app.chainsub)
+		if err != nil {
+			logger.Log().Warnf("backfill: parser init failed: %v — skipping", err)
+		} else {
+			app.backfill = backfill.New(app.chainsub.Client(), repo, parser, backfill.Config{
+				RegistryAddress: common.HexToAddress(app.config.Chain.RegistryAddress),
+				DefaultStart:    app.config.Chain.BackfillFromBlock,
+				ChunkSize:       app.config.Indexer.BackfillChunkSize,
+			})
+			app.runtimeWG.Add(1)
+			go func() {
+				defer app.runtimeWG.Done()
+				if err := app.backfill.Run(runtimeCtx); err != nil {
+					logger.Log().Warnf("backfill: %v", err)
+				}
+			}()
+		}
+	}
+
+	// Confirmer.
+	if app.chainsub.Client() != nil {
+		// Re-build confirmer with the now-available chain client + repo.
+		app.confirmer = confirmer.New(repo, app.chainsub.Client(), app.hub, confirmer.Config{
+			Threshold:  app.config.Indexer.Confirmations,
+			Interval:   time.Duration(app.config.Indexer.ReorgCheckIntervalSec) * time.Second,
+			BatchLimit: 500,
+		})
+		app.runtimeWG.Add(1)
+		go func() {
+			defer app.runtimeWG.Done()
+			if err := app.confirmer.Run(runtimeCtx); err != nil {
+				logger.Log().Errorf("confirmer.Run: %v", err)
+			}
+		}()
+	}
+
+	// Transport: gRPC server + healthz.
+	if err := app.modules.StartAll(runtimeCtx); err != nil {
 		return fmt.Errorf("start modules: %w", err)
 	}
 
-	logger.Log().Info("application is running, press Ctrl+C to stop")
+	logger.Log().Infof("indexer-service is running on chain=%s (chain_id=%d); ctrl-c to stop",
+		app.config.Chain.Name, app.config.Chain.ChainID)
 
-	// Wait for shutdown signal
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
-
 	<-quit
 	logger.Log().Info("shutdown signal received, stopping gracefully...")
-
 	return nil
 }
 
-// Stop gracefully shuts down all modules.
+// Stop cancels runtime goroutines and drains modules. Idempotent.
 func (app *App) Stop() error {
-	// Create context with timeout for graceful shutdown
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	if app.cancelRuntime != nil {
+		app.cancelRuntime()
+	}
+	if app.hub != nil {
+		app.hub.Shutdown()
+	}
+
+	stopCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	return app.modules.StopAll(ctx)
+	moduleErr := app.modules.StopAll(stopCtx)
+
+	doneCh := make(chan struct{})
+	go func() {
+		app.runtimeWG.Wait()
+		close(doneCh)
+	}()
+	select {
+	case <-doneCh:
+	case <-stopCtx.Done():
+		logger.Log().Warn("runtime goroutines did not exit within 30s")
+	}
+	return moduleErr
 }
 
 // Config returns the application configuration.
-func (app *App) Config() *config.Scheme {
-	return app.config
-}
+func (app *App) Config() *config.Scheme { return app.config }
 
 // Version returns the application version string.
-func (app *App) Version() string {
-	return app.version.String()
+func (app *App) Version() string { return app.version.String() }
+
+// Modules returns the module manager.
+func (app *App) Modules() *module.Manager { return app.modules }
+
+// waitForChainClient polls for chainsub.Client() to become non-nil.
+// Returns once the client is ready or the timeout elapses.
+func (app *App) waitForChainClient(ctx context.Context, timeout time.Duration) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if app.chainsub.Client() != nil {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
 }
 
-// Modules returns the module manager (useful for health checks).
-func (app *App) Modules() *module.Manager {
-	return app.modules
+// findRepository walks the module manager for the repository module.
+func (app *App) findRepository() *repository.Module {
+	for _, m := range app.modules.List() {
+		if rm, ok := m.(*repository.Module); ok {
+			return rm
+		}
+	}
+	return nil
 }
 
-// Service returns the service instance.
-// Service is always registered; methods may fail if dependencies are unavailable.
-func (app *App) Service() service.IService {
-	return app.svc
-}
+// readyAdapter translates module.Manager.HealthCheckAll's map into a
+// single non-nil error for healthz.ReadyChecker.
+type readyAdapter struct{ m *module.Manager }
 
-// CreateAddr creates an address string from host and port.
-func CreateAddr(host string, port int) string {
-	return fmt.Sprintf("%s:%v", host, port)
+func (a *readyAdapter) Ready(ctx context.Context) error {
+	failures := a.m.HealthCheckAll(ctx)
+	var bad []string
+	for name, err := range failures {
+		if err != nil {
+			bad = append(bad, fmt.Sprintf("%s: %v", name, err))
+		}
+	}
+	if len(bad) == 0 {
+		return nil
+	}
+	return errors.New("modules unhealthy: " + strings.Join(bad, "; "))
 }

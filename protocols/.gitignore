@@ -1,0 +1,23 @@
+# No Go artifacts in this repo. Every downstream consumer generates
+# its own bindings from these protos at build time; this repository
+# only ships proto sources. Catches protoc-gen-go (*.pb.go),
+# protoc-gen-go-grpc (*_grpc.pb.go), connect-go (*.connect.go),
+# twirp (*.twirp.go), grpc-gateway (*.pb.gw.go), protoc-gen-validate
+# (*.pb.validate.go), and any hand-written Go that has no business
+# living here.
+*.go
+go.mod
+go.sum
+
+# Buf cache
+.buf/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

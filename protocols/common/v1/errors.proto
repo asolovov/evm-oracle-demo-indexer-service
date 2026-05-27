@@ -1,0 +1,38 @@
+syntax = "proto3";
+
+package common.v1;
+
+import "google/protobuf/any.proto";
+
+option go_package = "github.com/asolovov/evm-oracle-demo-protocols/common/v1;commonv1";
+
+// ErrorDetail provides structured information about a single error.
+// Can be used to represent validation errors, business logic errors, etc.
+message ErrorDetail {
+  // Error code (e.g., INVALID_ARGUMENT, NOT_FOUND, PERMISSION_DENIED).
+  // Should follow gRPC status codes or custom application codes.
+  string code = 1;
+  
+  // Human-readable error message.
+  string message = 2;
+  
+  // Field name that caused the error (optional).
+  // Useful for validation errors to identify which field failed.
+  string field = 3;
+  
+  // Additional context-specific metadata (optional).
+  // Can contain any serialized message type for rich error details.
+  google.protobuf.Any metadata = 4;
+}
+
+// ErrorResponse provides a consistent structure for error responses.
+// Use this for returning multiple errors in a single response.
+message ErrorResponse {
+  // List of errors that occurred.
+  // Multiple errors allow returning all validation failures at once.
+  repeated ErrorDetail errors = 1;
+  
+  // Trace ID for correlating errors across services.
+  // Should match the trace ID in distributed tracing systems.
+  string trace_id = 2;
+}

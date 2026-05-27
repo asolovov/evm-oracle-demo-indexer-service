@@ -16,3 +16,24 @@ breaking:
   use:
     - FILE
   ignore_unstable_packages: false
+  # One-time scaffold-time suppressions. Reason: this PR migrates the repo
+  # off the upstream `andskur/protocols-template` fork, which involves
+  # deleting the template's example/user files and renaming the Go module
+  # path on the two common protos we kept. Both are real FILE-rule breaks
+  # against the template baseline, intentional, and only happen once.
+  #
+  # TODO: remove the entries below in the first follow-up PR after this
+  # lands on main. After merge the new baseline already reflects these
+  # changes; leaving the entries in would silently mask a future deletion
+  # of status.proto/types.proto/user.proto (harmless — they're gone) but
+  # would ALSO mask any future `go_package` rename on errors.proto or
+  # pagination.proto (NOT harmless — that is a real breaking change we
+  # want CI to catch).
+  ignore_only:
+    FILE_NO_DELETE:
+      - common/v1/status.proto
+      - common/v1/types.proto
+      - user/v1/user.proto
+    FILE_SAME_GO_PACKAGE:
+      - common/v1/errors.proto
+      - common/v1/pagination.proto

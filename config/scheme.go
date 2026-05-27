@@ -1,5 +1,40 @@
-// Package config defines application configuration defaults and schema.
+// Package config defines indexer-service configuration defaults and schema.
+//
+// Only the modules this service actually uses are described here
+// (architecture rule 4: indexer is a server-only, observer-only rig).
+// Notably absent:
+//
+//   - http        — indexer serves over gRPC; healthz lives under
+//     its own dedicated http listener (see HealthzConfig).
+//   - grpc_client — indexer does NOT call out to any other service;
+//     consumers pull from StreamEvents instead.
+//   - websocket   — not exposed by this service.
 package config
+
+// Scheme is the indexer-service configuration scheme.
+type Scheme struct {
+	Database  *DatabaseConfig  `mapstructure:"database"`
+	GRPC      *GRPCConfig      `mapstructure:"grpc"`
+	Healthz   *HealthzConfig   `mapstructure:"healthz"`
+	Chain     *ChainConfig     `mapstructure:"chain"`
+	Indexer   *IndexerConfig   `mapstructure:"indexer"`
+	Telemetry *TelemetryConfig `mapstructure:"telemetry"`
+	Env       string           `mapstructure:"env"`
+}
+
+// DatabaseConfig holds the connection to the dedicated `evm_indexer` Postgres database.
+type DatabaseConfig struct {
+	Driver          string `mapstructure:"driver"` // always "postgres"
+	Host            string `mapstructure:"host"`
+	Name            string `mapstructure:"name"`
+	User            string `mapstructure:"user"`
+	Password        string `mapstructure:"password"`
+	SSLMode         string `mapstructure:"ssl_mode"`
+	Port            int    `mapstructure:"port"`
+	MaxOpenConns    int    `mapstructure:"max_open_conns"`
+	MaxIdleConns    int    `mapstructure:"max_idle_conns"`
+	ConnMaxLifetime int    `mapstructure:"conn_max_lifetime"` // seconds
+}
 
 // GRPCConfig holds gRPC server settings.
 type GRPCConfig struct {
@@ -9,116 +44,62 @@ type GRPCConfig struct {
 	MaxRecvMsgSize   int    `mapstructure:"max_recv_msg_size"`
 	Port             int    `mapstructure:"port"`
 	NumStreamWorkers uint32 `mapstructure:"num_stream_workers"`
-	Enabled          bool   `mapstructure:"enabled"`
+	Reflection       bool   `mapstructure:"reflection"`
 }
 
-// GRPCClientConfig holds gRPC client settings for connecting to external services.
-type GRPCClientConfig struct {
-	KeepAlive *KeepAliveConfig `mapstructure:"keep_alive"` // Keep-alive settings
-	Address   string           `mapstructure:"address"`    // External service address (e.g., "user-service:9090")
-	Timeout   string           `mapstructure:"timeout"`    // Request timeout (e.g., "30s")
-	Enabled   bool             `mapstructure:"enabled"`    // Enable gRPC client module
+// HealthzConfig holds the dedicated HTTP listener for /healthz, /readyz, /metrics.
+type HealthzConfig struct {
+	Host string `mapstructure:"host"`
+	Port int    `mapstructure:"port"`
 }
 
-// KeepAliveConfig holds gRPC keep-alive settings.
-type KeepAliveConfig struct {
-	Time                string `mapstructure:"time"`                  // Send pings interval (e.g., "10s")
-	Timeout             string `mapstructure:"timeout"`               // Ping ack timeout (e.g., "1s")
-	PermitWithoutStream bool   `mapstructure:"permit_without_stream"` // Send pings even without active streams
+// ChainConfig describes the single target EVM chain the indexer observes.
+//
+// Single-chain by design — running multiple chains simultaneously is
+// out of scope (spec §1 / §3.2). To swap chains, change the values
+// here and replay from BackfillFromBlock.
+type ChainConfig struct {
+	// Friendly chain name (e.g. "ethereum-sepolia"). Surfaced in logs and metrics.
+	Name string `mapstructure:"name"`
+
+	// EIP-155 chain id (e.g. 11155111 for Ethereum Sepolia).
+	ChainID uint64 `mapstructure:"chain_id"`
+
+	// WebSocket endpoint used for live `SubscribeFilterLogs`.
+	WSURL string `mapstructure:"ws_url"`
+
+	// JSON-RPC endpoint used for `eth_getLogs`, `latestRoundData`, etc.
+	RPCURL string `mapstructure:"rpc_url"`
+
+	// 20-byte 0x-prefixed lowercase hex of the deployed OracleRegistry.
+	RegistryAddress string `mapstructure:"registry_address"`
+
+	// Block height to start backfilling from on a cold start. Pinned to
+	// the block at/just before the contracts were deployed so backfill
+	// is bounded.
+	BackfillFromBlock uint64 `mapstructure:"backfill_from_block"`
 }
 
-// HTTPConfig holds HTTP server settings.
-type HTTPConfig struct {
-	// Pointers first to reduce padding.
-	CORS       *CORSConfig       `mapstructure:"cors"`       // CORS settings
-	RateLimit  *RateLimitConfig  `mapstructure:"rate_limit"` // Rate limiting
-	Gatekeeper *GatekeeperConfig `mapstructure:"gatekeeper"` // Gatekeeper configuration (JWT validation service)
+// IndexerConfig holds confirmer + stream-hub knobs.
+type IndexerConfig struct {
+	// Confirmations required before an event is considered final and
+	// allowed to flow through the StreamEvents hub.
+	Confirmations uint32 `mapstructure:"confirmations"`
 
-	Host        string   `mapstructure:"host"`         // Server host (e.g., "0.0.0.0" or "localhost")
-	Timeout     string   `mapstructure:"timeout"`      // Request timeout (e.g., "30s")
-	SwaggerSpec string   `mapstructure:"swagger_spec"` // Path to swagger.yaml
-	AdminEmails []string `mapstructure:"admin_emails"` // Admin user emails for role checking
-	Port        int      `mapstructure:"port"`         // Server port (e.g., 8080)
+	// Interval at which the confirmer scans unconfirmed events.
+	ReorgCheckIntervalSec uint32 `mapstructure:"reorg_check_interval_sec"`
 
-	Enabled  bool `mapstructure:"enabled"`   // Enable HTTP module
-	MockAuth bool `mapstructure:"mock_auth"` // Enable mock auth for testing (bypasses gatekeeper)
+	// Block-chunk size for `eth_getLogs` backfill calls.
+	BackfillChunkSize uint64 `mapstructure:"backfill_chunk_size"`
+
+	// Per-subscriber outbound queue depth on the stream hub. When a
+	// subscriber lags past this, it gets dropped (rule from spec §3.2:
+	// "backpressure: drop slow clients").
+	StreamSubscriberBuffer int `mapstructure:"stream_subscriber_buffer"`
 }
 
-// CORSConfig holds CORS settings.
-type CORSConfig struct {
-	AllowedOrigins []string `mapstructure:"allowed_origins"` // ["*"] or ["https://myapp.com"]
-	AllowedMethods []string `mapstructure:"allowed_methods"` // ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"]
-	AllowedHeaders []string `mapstructure:"allowed_headers"` // ["*"] or specific headers
-	MaxAge         int      `mapstructure:"max_age"`         // Preflight cache duration in seconds
-	Enabled        bool     `mapstructure:"enabled"`         // Enable CORS middleware
-}
-
-// RateLimitConfig holds rate limiting settings.
-type RateLimitConfig struct {
-	Enabled        bool    `mapstructure:"enabled"`          // Enable rate limiting middleware
-	RequestsPerSec float64 `mapstructure:"requests_per_sec"` // Requests per second (e.g., 100.0)
-	Burst          int     `mapstructure:"burst"`            // Burst size (e.g., 20)
-}
-
-// GatekeeperConfig holds gatekeeper service settings.
-type GatekeeperConfig struct {
-	Address string `mapstructure:"address"` // gRPC address (e.g., "localhost:9091")
-	Timeout string `mapstructure:"timeout"` // Request timeout (e.g., "5s")
-}
-
-// WebSocketConfig holds WebSocket server settings.
-type WebSocketConfig struct {
-	Limits          *WSLimitsConfig `mapstructure:"limits"`            // Connection limits
-	Host            string          `mapstructure:"host"`              // Server host (e.g., "0.0.0.0")
-	Timeout         string          `mapstructure:"timeout"`           // Connection timeout (e.g., "30s")
-	PingInterval    string          `mapstructure:"ping_interval"`     // Ping keepalive interval (e.g., "54s")
-	PongWait        string          `mapstructure:"pong_wait"`         // Pong response timeout (e.g., "60s")
-	WriteWait       string          `mapstructure:"write_wait"`        // Write deadline (e.g., "10s")
-	MaxMessageSize  int64           `mapstructure:"max_message_size"`  // Max message size in bytes
-	Port            int             `mapstructure:"port"`              // Server port (e.g., 8081)
-	ReadBufferSize  int             `mapstructure:"read_buffer_size"`  // Read buffer size in bytes
-	WriteBufferSize int             `mapstructure:"write_buffer_size"` // Write buffer size in bytes
-	Enabled         bool            `mapstructure:"enabled"`           // Enable WebSocket module
-}
-
-// WSLimitsConfig holds WebSocket connection limit settings.
-type WSLimitsConfig struct {
-	MaxConnections        int `mapstructure:"max_connections"`          // Global max connections (0 = unlimited)
-	MaxConnectionsPerRoom int `mapstructure:"max_connections_per_room"` // Per-room max connections (0 = unlimited)
-}
-
-// Scheme represents the application configuration scheme.
-type Scheme struct {
-	// Database configuration for repository module (optional; nil if disabled).
-	Database *DatabaseConfig `mapstructure:"database"`
-
-	// GRPC configuration for gRPC module (optional; nil if disabled).
-	GRPC *GRPCConfig `mapstructure:"grpc"`
-
-	// GRPCClient configuration for gRPC client module (optional; nil if disabled).
-	GRPCClient *GRPCClientConfig `mapstructure:"grpc_client"`
-
-	// HTTP configuration for HTTP module (optional; nil if disabled).
-	HTTP *HTTPConfig `mapstructure:"http"`
-
-	// WebSocket configuration for WebSocket module (optional; nil if disabled).
-	WebSocket *WebSocketConfig `mapstructure:"websocket"`
-
-	// Env is the application environment (e.g. prod, dev, local).
-	Env string `mapstructure:"env"`
-}
-
-// DatabaseConfig holds database connection settings.
-type DatabaseConfig struct {
-	Driver          string `mapstructure:"driver"` // postgres, mysql, sqlite
-	Host            string `mapstructure:"host"`
-	Name            string `mapstructure:"name"` // database name
-	User            string `mapstructure:"user"`
-	Password        string `mapstructure:"password"`
-	SSLMode         string `mapstructure:"ssl_mode"` // disable, require, verify-full
-	Port            int    `mapstructure:"port"`
-	MaxOpenConns    int    `mapstructure:"max_open_conns"`
-	MaxIdleConns    int    `mapstructure:"max_idle_conns"`
-	ConnMaxLifetime int    `mapstructure:"conn_max_lifetime"` // seconds
-	Enabled         bool   `mapstructure:"enabled"`
+// TelemetryConfig holds logging + metrics knobs.
+type TelemetryConfig struct {
+	LogLevel  string `mapstructure:"log_level"`  // debug|info|warn|error
+	LogFormat string `mapstructure:"log_format"` // json|text
 }

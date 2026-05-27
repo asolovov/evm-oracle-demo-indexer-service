@@ -10,20 +10,29 @@ permissions:
   contents: read
   pull-requests: read
 
+# All third-party actions are SHA-pinned per Gateway org policy + this
+# project's NFR-07. Refresh by re-resolving `git/refs/tags/<tag>` via the
+# GitHub API and updating both the SHA and the trailing `# v...` comment.
+env:
+  GO_VERSION: "1.25"
+  BUF_VERSION: "v1.55.0"
+  PROTOC_GEN_GO_VERSION: "v1.36.0"
+  PROTOC_GEN_GO_GRPC_VERSION: "v1.5.1"
+
 jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
-          go-version: "1.24"
+          go-version: ${{ env.GO_VERSION }}
 
       - name: Cache Go modules
-        uses: actions/cache@v4
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
         with:
           path: |
             ~/.cache/go-build
@@ -35,43 +44,33 @@ jobs:
       - name: Install dependencies
         run: go mod download
 
-      - name: Install protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Install buf + protoc plugins (pinned)
+        run: |
+          go install github.com/bufbuild/buf/cmd/buf@${{ env.BUF_VERSION }}
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@${{ env.PROTOC_GEN_GO_VERSION }}
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@${{ env.PROTOC_GEN_GO_GRPC_VERSION }}
 
-      - name: Install proto tools
-        run: make proto-install
-
-      - name: Generate protos
-        run: make proto-generate-all
-
-      - name: Install golangci-lint
-        run: make lint-install
-
-      - name: Install go-swagger
-        run: make swagger-install
-
-      - name: Validate Swagger spec
-        run: make swagger-validate
-
-      - name: Generate API code
-        run: make generate-api
+      - name: Generate Go stubs from ./protocols
+        run: make proto-gen
 
       - name: Lint
-        run: make lint
+        uses: golangci/golangci-lint-action@db582008a42febd596419635a5abc9d9815daa9c # v9.2.1
+        with:
+          version: v2.11.4
 
   test:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
-          go-version: "1.24"
+          go-version: ${{ env.GO_VERSION }}
 
       - name: Cache Go modules
-        uses: actions/cache@v4
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
         with:
           path: |
             ~/.cache/go-build
@@ -83,23 +82,14 @@ jobs:
       - name: Install dependencies
         run: go mod download
 
-      - name: Install protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Install buf + protoc plugins (pinned)
+        run: |
+          go install github.com/bufbuild/buf/cmd/buf@${{ env.BUF_VERSION }}
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@${{ env.PROTOC_GEN_GO_VERSION }}
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@${{ env.PROTOC_GEN_GO_GRPC_VERSION }}
 
-      - name: Install proto tools
-        run: make proto-install
-
-      - name: Generate protos
-        run: make proto-generate-all
-
-      - name: Install go-swagger
-        run: make swagger-install
-
-      - name: Validate Swagger spec
-        run: make swagger-validate
-
-      - name: Generate API code
-        run: make generate-api
+      - name: Generate Go stubs from ./protocols
+        run: make proto-gen
 
       - name: Test
         run: make test
@@ -108,15 +98,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
-          go-version: "1.24"
+          go-version: ${{ env.GO_VERSION }}
 
       - name: Cache Go modules
-        uses: actions/cache@v4
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
         with:
           path: |
             ~/.cache/go-build
@@ -128,20 +118,11 @@ jobs:
       - name: Install dependencies
         run: go mod download
 
-      - name: Install protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-
-      - name: Install proto tools
-        run: make proto-install
-
-      - name: Generate protos
-        run: make proto-generate-all
-
-      - name: Install go-swagger
-        run: make swagger-install
-
-      - name: Generate API code
-        run: make generate-api
+      - name: Install buf + protoc plugins (pinned)
+        run: |
+          go install github.com/bufbuild/buf/cmd/buf@${{ env.BUF_VERSION }}
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@${{ env.PROTOC_GEN_GO_VERSION }}
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@${{ env.PROTOC_GEN_GO_GRPC_VERSION }}
 
       - name: Build
         run: make build

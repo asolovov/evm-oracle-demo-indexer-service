@@ -18,20 +18,15 @@
 
 __debug_bin
 
-microservice-template
+evm-oracle-demo-indexer-service
+bin/
 
 # Template synchronization metadata (only in downstream repos)
 .template-version
 
-# TODO: add any required ignore patterns here
-
-# Generated protobuf outputs (kept locally, not committed)
-*.pb.go
-*_grpc.pb.go
-
-# Generated swagger/HTTP API code (kept locally, not committed)
-internal/http/server/
-internal/http/models/
+# Generated protobuf outputs — service-owned codegen lands here at build
+# time. NEVER committed. (architecture rule 9)
+internal/genproto/
 
 # Local docker-compose data
 /data/
@@ -39,6 +34,3 @@ internal/http/models/
 .env
 
 local
-
-
-microservice-template

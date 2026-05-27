@@ -21,7 +21,7 @@ if [[ -z "${NEW_MODULE}" ]]; then
   exit 1
 fi
 
-NAME_REGEX='^[a-z0-9][a-z0-9-]*(/[a-z0-9][a-z0-9-]*)*$'
+NAME_REGEX='^[a-z0-9][a-z0-9.-]*(/[a-z0-9][a-z0-9.-]*)*$'
 if [[ ! "${NEW_MODULE}" =~ ${NAME_REGEX} ]]; then
   echo "Error: NEW_NAME must match ${NAME_REGEX}" >&2
   exit 1

@@ -1,605 +1,197 @@
-# go-microservice-template
+# evm-oracle-demo-indexer-service
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
-[![Go Version](https://img.shields.io/badge/Go-1.23%2B-00ADD8?logo=go)](https://go.dev/)
+[![Go Version](https://img.shields.io/badge/Go-1.25%2B-00ADD8?logo=go)](https://go.dev/)
 
-A minimal Go microservice template with Cobra/Viper CLI wiring, ldflags-driven versioning, logrus logging, Makefile targets, tests, and GitHub Actions CI/CD (lint/test/build on PRs/main plus auto-tagged releases on `main`). The structure is intentionally simple so you can plug in your runtime workloads quickly.
+Single-chain event indexer for the [EVM Oracle Demo](https://github.com/asolovov). It is the **single chain-observer** for the system: it WS-subscribes to every registered `PriceAggregator` plus the `OracleRegistry`, persists every observed event into `evm_indexer` past the configured confirmation depth, and exposes a confirmation-gated gRPC stream that the rest of the stack (oracle-service, rest-api) consumes.
 
-## Quickstart
-- Requirements: Go 1.21+ (module sets 1.23/1.24), GNU `make`.
-- Clone and create your branch: `git checkout -b feature/your-branch`.
-- Build: `make build` (binary `./microservice-template`).
-- Run: `make run` (invokes `go run -race cmd/microservice-template.go serve`).
-- Version: `./microservice-template --version`.
-- Lint: `make lint` (golangci-lint).
-- Test: `make test` or single test `go test ./... -run TestName -count=1`.
-- Generate + test: `make test-with-gen` (runs proto + swagger generation first).
-- Generate + lint: `make lint-with-gen` (runs proto + swagger generation first).
-- gRPC tests: `make test-grpc` (runs gRPC package including integration).
-- HTTP tests: `make test-http` (runs HTTP package tests).
-- Coverage: `make test-coverage` (writes `coverage.out`).
-- Tidy deps: `make tidy`; update deps: `make update`.
-- HTTP quickstart: see [docs/HTTP_SWAGGER_GUIDE.md](./docs/HTTP_SWAGGER_GUIDE.md); enable with `HTTP_ENABLED=true`, generate API with `make generate-api`, test with curl.
-- gRPC quickstart: see [docs/GRPC_GUIDE.md](./docs/GRPC_GUIDE.md); enable with `GRPC_ENABLED=true`, test with grpcurl; use shared protocols from `https://github.com/andskur/protocols-template.git`.
+**The `StreamEvents` server is the confirmation gate.** Subscribers (oracle-service filtering on `PRICE_REQUESTED`, rest-api on all kinds) get a clean post-confirmation feed and never see in-flight or re-orged logs — they don't need to gate on `meta.confirmations` themselves.
 
-### Renaming the project
-- Command: `make rename NEW_NAME=my-service` (required parameter).
-- Valid NEW_NAME: lowercase letters, numbers, hyphens, optional `/` segments (e.g., `my-service`, `github.com/yourorg/my-service`).
-- Updates: module path and imports, Makefile vars, entrypoint file, Cobra root `Use`, swagger API struct name, Dockerfile binary, README/AGENTS references, optional git remote.
-- After rename regenerate generated code: `make generate-all` (or at least `make generate-api` + proto generation as needed).
-- Verify after rename: `go test ./...`, `make build`, `./<new-binary> --version`.
+The indexer has **no outbound gRPC clients**. It does not call price-service, oracle-service, or anything else. Consumers pull from `indexer.v1.IndexerService/StreamEvents`.
 
-## Features
-- Simple, small footprint using standard libs plus Cobra/Viper/logrus.
-- **Module system** for optional components (repository, service, HTTP, gRPC, queue, etc.).
-- **HTTP REST API** with Swagger/OpenAPI spec-first approach using go-swagger.
-- **gRPC API** with protocol buffer code generation and health checks.
-- Version metadata injected via ldflags (`pkg/version`).
-- Structured logging via `pkg/logger` singleton.
-- Makefile targets for build/run/lint/test/tidy/update/generate-api.
-- CI pipeline: lint/test/build on PRs and `main`; release pipeline auto-tags on `main` and publishes a GitHub release (source-only).
-- Tests included for CLI wiring, config defaults, versioning, logger singleton, helpers, HTTP and gRPC modules.
-- Rename-friendly: single placeholder name with automated `make rename` target.
+---
 
-## Project Structure
+## Architecture
+
 ```
-go-microservice-template/
-├── api/                        # Swagger/OpenAPI specifications
-├── cmd/                        # CLI entry + commands
-├── config/                     # Viper defaults and scheme
-├── db/migrations/              # Database migration files (golang-migrate)
-├── docs/                       # Additional guides (HTTP_SWAGGER_GUIDE, GRPC_GUIDE)
-├── internal/
-│   ├── application.go          # App wiring + module registration
-│   ├── grpc/                   # gRPC module (server, interceptors)
-│   ├── http/                   # HTTP module (handlers, middleware, auth)
-│   ├── module/                 # Module interface/manager
-│   ├── repository/             # Repository module (optional)
-│   ├── service/                # Business logic module
-│   └── models/                 # Domain models/enums
-├── pkg/                        # Reusable packages (logger, version)
-├── protocols/                  # Protocol definitions pulled via subtree (no bundled example)
-├── scripts/                    # Automation scripts (rename)
-├── .github/workflows/          # CI/CD pipelines
-├── Dockerfile                  # Multi-stage container build
-├── docker-compose.yml          # Local stack (Postgres/app)
-├── Makefile                    # Build/run/lint/test/proto/swagger targets
-├── README.md, AGENTS.md        # Docs and guidelines
-└── go.mod, go.sum              # Dependencies
+                          chain (single, e.g. Ethereum Sepolia)
+                              │
+                  ┌───────────┼───────────────────────┐
+                  │           │                       │
+       OracleRegistry   PriceAggregator(s)     wss:// WS subscription
+                              │
+                              ▼
+            ┌─────────────────────────────────┐
+            │     internal/chainsub           │  ← decodes via abigen,
+            │   - WS SubscribeFilterLogs       │    resolves asset_id from
+            │   - latestRoundData backfill     │    contract address via
+            │   - keeps aggregator → asset map │    the registry mapping.
+            └────────────┬────────────────────┘
+                         │ InsertEvent(confirmations=0)
+                         ▼
+                   ┌──────────────┐
+                   │  evm_indexer │   pgx/v5, typed JSONB payload
+                   │  Postgres    │   columns + denormalised asset_id/req_id
+                   └──────┬───────┘
+                          │ PendingEvents
+                          ▼
+            ┌─────────────────────────────────┐
+            │    internal/confirmer            │
+            │   - HeaderByNumber(blockNumber)  │
+            │   - bumps confirmations          │
+            │   - marks orphaned on reorg      │
+            │   - on threshold-cross: Publish  │
+            └────────────┬────────────────────┘
+                         │
+                         ▼
+                ┌──────────────────┐
+                │ internal/streamhub │   bounded per-subscriber buffer;
+                │   (THE GATE)      │   slow consumers dropped.
+                └──────┬────────────┘
+                       │
+                       ▼
+       ┌─────────────────────────────────────────┐
+       │ internal/grpcsrv — IndexerService:       │
+       │   - ListEvents(filter)                    │
+       │   - GetRequest(req_id)                    │
+       │   - StreamEvents(filter)  ← oracle & BFF  │
+       └─────────────────────────────────────────┘
+
+       Cold start fills the gap [cursor+1, head] via
+       internal/backfill — same Parser + InsertEvent path
+       so confirmer + hub see one ordered firehose.
 ```
 
-## Module System
+---
 
+## Run locally
 
-This template uses a **module-based architecture** for optional components. Modules provide a standard lifecycle (Init → Start → Stop) and can be enabled/disabled via configuration.
-
-### Available Module Slots
-
-The template includes configuration placeholders for common modules:
-
-| Module | Purpose | Config Key | Status |
-|--------|---------|-----------|--------|
-| Repository | Database-backed persistence (wraps DB connection) | `database` | ✅ Implemented (enabled when `database.enabled` is true) |
-| Service | Business logic orchestrator (optional deps) | n/a | ✅ Implemented (always registered; repository optional) |
-| HTTP | HTTP REST API server with Swagger/OpenAPI | `http` | ✅ Implemented (enabled when `http.enabled` is true) |
-| gRPC Server | gRPC API server | `grpc` | ✅ Implemented (enabled when `grpc.enabled` is true) |
-| gRPC Client | External service client for microservice communication | `grpc_client` | ✅ Implemented (enabled when `grpc_client.enabled` is true) |
-| WebSocket | WebSocket server with pub/sub and rooms | `websocket` | ✅ Implemented (enabled when `websocket.enabled` is true) |
-
-### Enabling Modules
-
-Configuration can come from env vars (recommended) or a config file (`config.yaml` is optional). Viper merges: flags > env vars > config file.
-
-**Env example (preferred):**
 ```bash
-export DATABASE_ENABLED=true
-export DATABASE_DRIVER=postgres
-export DATABASE_HOST=localhost
-export DATABASE_PORT=5432
+make build              # codegen + compile, binary at ./evm-oracle-demo-indexer-service
+make test               # unit tests
+make test-integration   # docker-backed integration suite (testcontainers)
+make lint               # golangci-lint
 ```
 
-**config.yaml example (optional):**
-```yaml
-database:
-  enabled: true
-  driver: postgres
-  host: localhost
-  port: 5432
-  # ... other settings
-```
-
-- The repository module registers only when `database.enabled` (or `DATABASE_ENABLED`) is `true`.
-- The service module always registers; if no repository is available, database operations return clear errors.
-
-See `config/scheme.go` for configuration structure definitions.
-
-### Database Setup
-
-The repository module requires PostgreSQL when enabled.
-
-**Quick start with Docker:**
 ```bash
-docker run --name postgres-dev \
-  -e POSTGRES_USER=dev \
-  -e POSTGRES_PASSWORD=dev \
-  -e POSTGRES_DB=microservice_dev \
-  -p 5432:5432 \
-  -d postgres:16-alpine
+# With docker-compose (brings up Postgres + migrate + indexer)
+export CHAIN_WS_URL=wss://...
+export CHAIN_RPC_URL=https://...
+docker compose up --build
 ```
 
-**Install migration tool (one-time):**
-```bash
-make migrate-install
-```
-
-**Run migrations:**
-```bash
-# Apply all pending migrations
-make migrate-up
-
-# Check current migration version
-make migrate-version
-```
-
-**Available migration targets:**
-```bash
-make migrate-install      # Install golang-migrate CLI
-make migrate-create       # Create new migration (requires NAME=)
-make migrate-up           # Apply all pending migrations
-make migrate-down         # Rollback last migration
-make migrate-force        # Force migration version (requires VERSION=)
-make migrate-version      # Show current migration version
-make migrate-drop         # Drop all tables (⚠️ DANGER - requires confirmation)
-```
-
-**Local development with Docker Compose:**
-```bash
-# Start Postgres and auto-run migrations (uses db/migrations)
-make compose-up
-
-# Stop services
-make compose-down
-
-# Restart services
-make compose-restart
-```
-
-For production deployments, run migrations before starting the application or use a separate migration job in your deployment pipeline.
-
-### HTTP REST API Setup
-
-The HTTP module provides a REST API with Swagger/OpenAPI specification support using go-swagger.
-
-**Install go-swagger (one-time):**
-```bash
-make swagger-install
-```
-
-**Generate API server code from spec:**
-```bash
-# Validate the swagger spec
-make swagger-validate
-
-# Generate server code from api/swagger.yaml
-make generate-api
-```
-
-**Enable HTTP module:**
-```bash
-export HTTP_ENABLED=true
-export HTTP_HOST=0.0.0.0
-export HTTP_PORT=8080
-export HTTP_MOCK_AUTH=true  # For local development (bypasses JWT validation)
-
-# Run the service
-make run
-```
-
-**Test the HTTP endpoints:**
-```bash
-# Health check (public endpoint)
-curl http://localhost:8080/health
-
-# Get user by email (requires auth in production, mock mode for dev)
-curl -H "Authorization: Bearer test-token" \
-  "http://localhost:8080/users?email=test@example.com"
-```
-
-**Available HTTP targets:**
-```bash
-make swagger-install      # Install go-swagger CLI
-make swagger-validate     # Validate swagger spec
-make generate-api         # Generate server code from api/swagger.yaml
-make swagger-clean        # Remove generated code
-make test-http           # Run HTTP module tests
-```
-
-**Configuration options:**
-- `http.enabled` - Enable/disable HTTP server (default: false)
-- `http.host` - Server host (default: 0.0.0.0)
-- `http.port` - Server port (default: 8080)
-- `http.mock_auth` - Use mock authentication for development (default: false)
-- `http.cors.enabled` - Enable CORS (default: true)
-- `http.rate_limit.enabled` - Enable rate limiting (default: false)
-- `http.rate_limit.requests_per_sec` - Rate limit (default: 100.0)
-
-For detailed HTTP development guide including adding new endpoints, authentication, and middleware, see [docs/HTTP_SWAGGER_GUIDE.md](./docs/HTTP_SWAGGER_GUIDE.md).
-
-### gRPC Client Setup
-
-The gRPC client module enables communication with external gRPC microservices. HTTP handlers use the client to fetch data from external services, making this template ideal for gateway/BFF (Backend for Frontend) patterns.
-
-**Architecture Overview:**
-- **Hybrid approach**: Pure gRPC client in `pkg/userservice/` (proto types only) + module wrapper in `internal/grpcclient/` (conversions + lifecycle)
-- **HTTP integration**: HTTP handlers receive grpcClient as dependency and use it to fetch from external services
-- **Service independence**: Service layer remains focused on local business logic only
-
-**Enable gRPC client:**
-```bash
-export GRPC_CLIENT_ENABLED=true
-export GRPC_CLIENT_ADDRESS="user-service:9090"
-export GRPC_CLIENT_TIMEOUT="30s"
-
-# Run the service
-make run
-```
-
-**Configuration options:**
-- `grpc_client.enabled` - Enable/disable client (default: false)
-- `grpc_client.address` - External service address (default: "localhost:9090")
-- `grpc_client.timeout` - Request timeout (default: "30s")
-- `grpc_client.keep_alive.time` - Keep-alive ping interval (default: "10s")
-- `grpc_client.keep_alive.timeout` - Keep-alive timeout (default: "1s")
-- `grpc_client.keep_alive.permit_without_stream` - Send pings without streams (default: true)
-
-**Handler integration patterns:**
-
-The template demonstrates fetching from external service only. Alternative patterns are documented in handler code:
-
-```go
-// Pattern 1: External only (current implementation)
-user, err := h.grpcClient.GetUserByEmail(ctx, email)
-
-// Pattern 2: Local database only (commented alternative)
-// user, err := h.service.GetUserByEmail(ctx, email)
-
-// Pattern 3: External with local fallback (commented alternative)
-// user, err := h.grpcClient.GetUserByEmail(ctx, email)
-// if err != nil {
-//     user, err = h.service.GetUserByEmail(ctx, email)
-// }
-
-// Pattern 4: Aggregate from both sources (commented alternative)
-// externalUser, _ := h.grpcClient.GetUserByEmail(ctx, email)
-// localUser, _ := h.service.GetUserByEmail(ctx, email)
-// user = mergeUsers(externalUser, localUser)
-```
-
-**Test endpoints:**
-```bash
-# Requires external user-service running on configured address
-export HTTP_ENABLED=true
-export HTTP_MOCK_AUTH=true
-export GRPC_CLIENT_ENABLED=true
-export GRPC_CLIENT_ADDRESS="user-service:9090"
-
-make run
-
-# Test the endpoint
-curl -H "Authorization: Bearer test-token" \
-  "http://localhost:8080/users?email=test@example.com"
-```
-
-**Error handling:**
-- Returns **503 Service Unavailable** when grpcClient is not configured
-- Maps gRPC errors: `not found` → 404, `invalid input` → 400, `unavailable` → 503
-
-For detailed gRPC development guide including adding new services and proto definitions, see [docs/GRPC_GUIDE.md](./docs/GRPC_GUIDE.md).
-
-### WebSocket Server Setup
-
-The WebSocket module provides real-time bidirectional communication with pub/sub support and room management using `gorilla/websocket`.
-
-**Enable WebSocket module:**
-```bash
-export WEBSOCKET_ENABLED=true
-export WEBSOCKET_HOST=0.0.0.0
-export WEBSOCKET_PORT=8081
-
-# Run the service
-make run
-```
-
-**Configuration options:**
-- `websocket.enabled` - Enable/disable WebSocket server (default: false)
-- `websocket.host` - Server host (default: 0.0.0.0)
-- `websocket.port` - Server port (default: 8081)
-- `websocket.max_message_size` - Max message size in bytes (default: 512000)
-- `websocket.limits.max_connections` - Global connection limit (default: 0 = unlimited)
-- `websocket.limits.max_connections_per_room` - Per-room limit (default: 0 = unlimited)
-
-**Connect and test with wscat:**
-```bash
-# Install wscat
-npm install -g wscat
-
-# Connect
-wscat -c ws://localhost:8081/ws
-
-# Subscribe to a room
-> {"type":"subscribe","room":"notifications"}
-< {"type":"subscribed","room":"notifications","data":{"room":"notifications","client_count":1}}
-
-# Publish to a room
-> {"type":"publish","room":"notifications","data":{"message":"hello"}}
-
-# Broadcast to all clients
-> {"type":"broadcast","data":{"announcement":"server restart"}}
-```
-
-**Message types:**
-- `subscribe` - Join a room
-- `unsubscribe` - Leave a room
-- `publish` - Send message to a room (must be subscribed)
-- `broadcast` - Send message to all connected clients
-- `ping` - Keepalive ping (server responds with `pong`)
-
-**Health endpoint:**
-```bash
-curl http://localhost:8081/health
-# Returns: {"status":"healthy","clients":5,"rooms":2}
-```
-
-For detailed WebSocket development guide, see [docs/WEBSOCKET_GUIDE.md](./docs/WEBSOCKET_GUIDE.md).
-
-### Adding Custom Modules
-
-See [Module Development Guide](./docs/MODULE_DEVELOPMENT.md) for creating custom modules. The module system provides:
-
-- **Standard lifecycle**: Init → Start → Stop with health checks
-- **Dependency injection**: Modules depend on each other via constructor injection (explicit; no service locator)
-- **Configuration-driven**: Enable/disable modules via YAML/env vars (repository depends on `database.enabled`; service always registers)
-- **Graceful shutdown**: Automatic cleanup in reverse registration order
-
-## Models & Enums
-- Location: `internal/models` with go-pg struct tags/hooks for database integration.
-- Validation: implement `Validate() error` and return `*models.ValidationError` (`Field`, `Message`) for structured errors.
-- Enums: typed ints with `String()` and case-insensitive `UserStatusFromString()`; add proto/JWT conversions later if needed.
-- Hooks: `BeforeInsert`/`BeforeUpdate` convert enums to strings and ensure UUID/timestamps; `AfterSelect` converts strings back to enums.
-
-### Example: User Model
-```go
-// internal/models/user.go
-user := &models.User{
-    Email:  "test@example.com",
-    Name:   "Jane Doe",
-    Status: models.UserActive,
-}
-
-if err := user.Validate(); err != nil {
-    if verr, ok := err.(*models.ValidationError); ok {
-        // structured error with field context
-        log.Printf("field=%s msg=%s", verr.Field, verr.Message)
-    }
-    return err
-}
-```
-
-### Creating a New Model (pattern)
-```go
-// internal/models/widget.go
-package models
-
-type Widget struct {
-    ID    uuid.UUID
-    Name  string
-    State WidgetState
-}
-
-func (w *Widget) Validate() error {
-    if w.Name == "" {
-        return newValidationError("name", "is required")
-    }
-    if w.State < WidgetActive || w.State >= widgetStateUnsupported {
-        return newValidationError("state", "invalid value")
-    }
-    return nil
-}
-```
-
-### Example: UserStatus Enum
-```go
-// internal/models/user_status.go
-status := models.UserActive
-fmt.Println(status.String()) // "active"
-
-parsed, err := models.UserStatusFromString("DELETED")
-if err != nil {
-    // invalid value
-}
-fmt.Println(parsed == models.UserDeleted) // true
-```
-
-### Creating a New Enum (pattern)
-```go
-// internal/models/widget_state.go
-package models
-
-type WidgetState int
-
-const (
-    WidgetActive WidgetState = iota
-    WidgetDisabled
-    widgetStateUnsupported
-)
-
-var widgetStates = [...]string{
-    WidgetActive:   "active",
-    WidgetDisabled: "disabled",
-}
-
-func (s WidgetState) String() string {
-    if s < 0 || int(s) >= len(widgetStates) {
-        return ""
-    }
-    return widgetStates[s]
-}
-
-func WidgetStateFromString(v string) (WidgetState, error) {
-    for i, r := range widgetStates {
-        if strings.EqualFold(v, r) {
-            return WidgetState(i), nil
-        }
-    }
-    return widgetStateUnsupported, fmt.Errorf("invalid widget state %q", v)
-}
-```
-
-## Limitations
-This is a basic, generic Go microservice template designed to provide a clear structure and foundational tooling. It remains intentionally minimal.
+### gRPC surface
+
+| RPC | Notes |
+| --- | --- |
+| `IndexerService/ListEvents` | Paginated historical. Filter by `kinds`, `asset_id`, `from_block`, `to_block`. Excludes orphaned + sub-threshold rows. |
+| `IndexerService/GetRequest` | Joins `PriceRequested` + matching `PriceFulfilled` by `req_id`. NotFound if no observed request past the threshold. |
+| `IndexerService/StreamEvents` | **Confirmation gate.** Long-lived server stream. `from_block > 0` → replay history (ASC), then attach live. `from_block = 0` → live-only. Per-subscriber buffer; slow consumers dropped. |
+| `grpc.health.v1.Health/Check` | Standard. Reflection is on by default for `grpcurl`. |
+
+### HTTP surface
+
+| Path | Notes |
+| --- | --- |
+| `/healthz` | Liveness — 200 once the listener is up. |
+| `/readyz` | Walks every module's `HealthCheck`; 503 on any failure. |
+| `/metrics` | Prometheus. Counters / gauges defined in `internal/metrics`. |
+
+---
 
 ## Configuration
-- Defaults: `env` defaults to `prod` (`config/init.go:setDefaults`).
-- Precedence: flags > env vars > config file.
-- Env var naming: dots become underscores (Viper replacer).
-- To add a config field:
-  ```go
-  // config/scheme.go
-  type Scheme struct {
-      Env  string // existing
-      Port int    // new
-  }
 
-  // config/init.go
-  func setDefaults() {
-      viper.SetDefault("env", "prod")
-      viper.SetDefault("port", 8080)
-  }
+Every value is set via env (`viper.SetDefault` registers a default for every key per architecture rule 6). Required-but-secret keys default to empty strings; `config.Validate` fails fast on missing values.
 
-  // cmd/root (bind a flag)
-  cmd.Flags().Int("port", 0, "port to listen on")
-  ```
-  Precedence will ensure flag > env > config file for `port` as well.
+| Env var | Default | Notes |
+| --- | --- | --- |
+| `ENV` | `prod` | |
+| `DATABASE_HOST` | `localhost` | |
+| `DATABASE_PORT` | `5432` | |
+| `DATABASE_USER` | `indexer_user` | |
+| `DATABASE_PASSWORD` | _empty (required)_ | |
+| `DATABASE_NAME` | `evm_indexer` | dedicated DB, never shared |
+| `DATABASE_SSL_MODE` | `disable` | |
+| `DATABASE_MAX_OPEN_CONNS` | `25` | |
+| `DATABASE_MAX_IDLE_CONNS` | `5` | |
+| `DATABASE_CONN_MAX_LIFETIME` | `300` (seconds) | |
+| `GRPC_HOST` | `0.0.0.0` | |
+| `GRPC_PORT` | `9090` | |
+| `GRPC_MAX_RECV_MSG_SIZE` | `62914560` (60MB) | |
+| `GRPC_MAX_SEND_MSG_SIZE` | `62914560` (60MB) | |
+| `GRPC_REFLECTION` | `true` | |
+| `HEALTHZ_HOST` | `0.0.0.0` | |
+| `HEALTHZ_PORT` | `8080` | |
+| `CHAIN_NAME` | `ethereum-sepolia` | |
+| `CHAIN_CHAIN_ID` | `11155111` | |
+| `CHAIN_WS_URL` | _empty (required)_ | |
+| `CHAIN_RPC_URL` | _empty (required)_ | |
+| `CHAIN_REGISTRY_ADDRESS` | _empty (required)_ | 0x-prefixed 20-byte hex |
+| `CHAIN_BACKFILL_FROM_BLOCK` | `0` | used only when `chain_cursor.last_processed_block = 0` |
+| `INDEXER_CONFIRMATIONS` | `5` | threshold for StreamEvents emission |
+| `INDEXER_REORG_CHECK_INTERVAL_SEC` | `10` | |
+| `INDEXER_BACKFILL_CHUNK_SIZE` | `1000` | blocks per `eth_getLogs` call |
+| `INDEXER_STREAM_SUBSCRIBER_BUFFER` | `256` | per-subscriber outbound buffer (overflow → drop) |
+| `TELEMETRY_LOG_LEVEL` | `info` | |
+| `TELEMETRY_LOG_FORMAT` | `json` | |
 
-## CLI
-- Root command name: `microservice-template`.
-- Subcommands: `serve` (current runtime hook). Add more via `cmd/<name>` and register on root.
-- Version output: `./microservice-template --version` (ldflags populate `pkg/version`).
-- `serve` lifecycle: `PreRun` logs version; `RunE` should start your workloads; `PostRun` always stops app.
-- Adding a new command (example):
-  ```go
-  // cmd/health/health.go
-  package health
+---
 
-  import "github.com/spf13/cobra"
+## Project layout
 
-  func Cmd() *cobra.Command {
-      return &cobra.Command{
-          Use:   "health",
-          Short: "Health probe",
-          RunE: func(_ *cobra.Command, _ []string) error {
-              // add checks here
-              return nil
-          },
-      }
-  }
-  ```
-  Register it in `cmd/microservice-template.go`: `rootCmd.AddCommand(health.Cmd())`.
-
-## Development Workflow
-- Format: `gofmt` (used via go tooling).
-- Lint: `make lint` (golangci-lint; see `.golangci.yml`).
-- Tests: `make test` or `go test ./...`; single test example `go test ./cmd/root -run TestInitializeConfig -count=1`.
-- Build: `make build` (CGO disabled; ldflags inject version info).
-- Deps: `make tidy` after changes; `make update` to bump modules.
-
-## CI/CD
-- Workflows: `.github/workflows/ci.yml` and `.github/workflows/release.yml`.
-  - CI (`ci.yml`): on PRs and `main`, runs `make lint`, `make test`, `make build` (Go 1.24) with module caching.
-  - Release (`release.yml`): on `main`, reruns lint/test/build, determines next incremental tag (`v1`, `v2`, …), pushes the tag, and creates a GitHub release with autogenerated notes (source-only). Uses `GITHUB_TOKEN`; no extra secrets needed.
-- Branch protection (recommended): require CI checks (`lint`, `test`, `build`) to pass before merging to `main` and limit direct pushes.
-
-## Versioning
-- `Makefile` injects name/tag/commit/branch/remote/build date into `pkg/version` via ldflags.
-- `pkg/version` formats a multi-line version string and handles unspecified values.
-- Sample output:
-  ```
-  Template-service v0.0.0
-  Branch main, commit hash: abcdef123
-  Origin repository: https://github.com/org/repo
-  Compiled at: 2026-01-16 20:58:09 +0000 UTC
-  ©2026
-  ```
-
-## Logging
-- `pkg/logger.Log()` returns a logrus logger with full timestamps.
-- Example:
-  ```go
-  log := logger.Log()
-  log.Infof("starting service", "env=%s", cfg.Env)
-  log.Errorf("failed to start: %v", err)
-  ```
-
-## Extending the template
-> **Note:** To rename an existing project, see the [Renaming the project](#renaming-the-project) section in Quickstart.
-
-- Add config: update `Scheme`, `setDefaults`, and CLI flags; test binding like in `cmd/root/root_test.go`.
-- Add commands: create `cmd/<name>` with `cobra.Command`, register on root in `cmd/microservice-template.go`.
-  After renaming the entrypoint file (e.g., `cmd/yourservice.go`), register new commands there.
-- Add runtime logic: implement `App.Init/Serve/Stop` with proper context/shutdown handling and graceful shutdown.
-- Add tests: follow table-driven patterns; reset global state (Viper) in `t.Cleanup`.
-
-## Keeping Up-to-Date with Template Changes
-
-This project can receive updates from the upstream template: [go-microservice-template](https://github.com/andskur/go-microservice-template).
-
-### Initial setup (downstream projects)
-```bash
-make template-setup
 ```
-This will:
-- Add the template remote (`template`)
-- Fetch the latest template changes
-- Create `.template-version` to track sync state
-
-### Checking for updates
-```bash
-make template-status
-make template-diff       # summary diff vs template/main
-make template-diff v1.2.0 # diff against a specific tag
+config/                   config scheme + viper defaults + Validate()
+internal/
+  application.go          SINGLE wiring point (architecture rules 1+2)
+  models/                 domain types + proto<->model conversions (rule 3)
+  repository/             pgx repository for events / chain_cursor / aggregator_registry
+  chainsub/               WS subscriber + log parser (abigen-driven)
+  confirmer/              ticking confirmation gate, reorg handling
+  streamhub/              in-memory pub/sub — the confirmation gate
+  backfill/               cold-start gap-fill via eth_getLogs
+  grpcsrv/                IndexerService server
+  metrics/                Prometheus registry + adapters
+  healthz/                /healthz, /readyz, /metrics listener
+  module/                 lifecycle manager (template-provided, retained)
+pkg/
+  contracts/              abigen bindings (committed — rule 5 exception)
+    oracleregistry/
+    priceaggregator/
+    reporterset/
+  logger/                 logrus accessor
+  version/                build-time release metadata
+protocols/                git subtree of evm-oracle-demo-protocols
+                          (proto-source-only, language-agnostic)
+migrations/               golang-migrate scripts for evm_indexer
 ```
 
-### Syncing updates
-```bash
-make template-fetch      # fetch latest template changes
-make template-sync       # merge template/main into current branch
-make template-sync v1.2.0 # merge a specific tag
-```
+---
 
-After merging:
-- Resolve any conflicts manually
-- Run tests: `make test` (and `make build` if desired)
-- Commit with a clear message (e.g., `chore: sync from template v1.2.0`)
+## Architecture rules honoured
 
-### Files likely to need attention during sync
-- `README.md`, `AGENTS.md` (project-specific docs)
-- `internal/application.go` (module registration)
-- `config/scheme.go` and `config/init.go` (config schema/defaults)
-- `Makefile` (custom targets)
+1. `cmd/` does CLI + config init only.
+2. `internal/application.go` is the single wiring point; nothing self-wires.
+3. Every domain type + every proto/JSONB conversion lives in `internal/models/`.
+4. Internal modules are repositories, servers (gRPC + healthz), and in-project handlers. `chainsub`, `confirmer`, `streamhub`, `backfill` are plain packages — not template modules with Init/Start/Stop.
+5. `pkg/contracts/` holds abigen-generated bindings (rule 5 exception) — abigen bindings ARE committed; protobuf stubs are not.
+6. All config is in `/config/`. `viper.SetDefault` for every nested key.
+7. Owns DB `evm_indexer` exclusively.
+8. Bootstrap is env-var-driven (no separate seed CLIs / Job containers).
+9. `internal/genproto/*.go` is gitignored and regenerated by `make proto-gen` at build time; `protocols/` holds proto sources only. Abigen bindings are the documented exception.
 
-### Best practices
-- Sync regularly to reduce conflicts
-- Keep sync commits separate from feature work
-- Review `make template-diff` before merging
-- Use `.template-version` to record the last synced template ref (updated automatically on successful sync)
+---
 
-## Contributing
-Contributions are welcome! Please feel free to submit a Pull Request.
+## Known gaps / v1 limitations
 
-For development guidelines and best practices, see [AGENTS.md](./AGENTS.md).
+- **Hot-add of aggregators.** When `AssetRegistered` arrives the persistent mapping + in-memory cache update immediately, but the new aggregator's own logs won't reach the active WS filter — picked up on the next reconnect. Acceptable for the demo where aggregators are seeded at deploy time.
+- **PriceFulfilled `round_id`.** The on-chain event doesn't carry `round_id`. The chainsub backfills it best-effort via `latestRoundData()` at the fulfilling block; failures (revert, RPC hiccup) leave the field empty and the proto emits an empty string.
+- **`/metrics` cardinality.** Per-kind labels are bounded (3 values); the registry doesn't expose per-asset or per-address counters yet.
+- **Single-chain.** The whole rig assumes one chain — multi-chain would require duplicating chainsub + backfill + confirmer per chain, which is out of scope.
 
-## License
-This project is licensed under the MIT License — see the [LICENSE](./LICENSE) file for details.
+---
 
 ## Author
-Copyright (c) 2022 Andrey Skurlatov
+
+Built by **Andrei Solovov** for the EVM Oracle Demo portfolio.
+
+[LinkedIn](https://www.linkedin.com/in/asolovov) · [GitHub](https://github.com/asolovov) · [Live demo](https://github.com/asolovov)

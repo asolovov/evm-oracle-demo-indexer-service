@@ -10,15 +10,15 @@ import (
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
 
-	"microservice-template/config"
-	"microservice-template/internal"
+	"github.com/asolovov/evm-oracle-demo-indexer-service/config"
+	"github.com/asolovov/evm-oracle-demo-indexer-service/internal"
 )
 
 // Cmd returns the root command for the application.
 func Cmd(app *internal.App) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:              "microservice-template",
-		Short:            "Service Template",
+		Use:              "evm-oracle-demo-indexer-service",
+		Short:            "Indexer service for the EVM oracle demo — WS subscribes to chain events, persists past confirmation depth, and serves a confirmation-gated gRPC StreamEvents.",
 		TraverseChildren: true,
 		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
 			return initializeConfig(cmd, app.Config())

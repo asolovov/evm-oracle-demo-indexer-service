@@ -3,96 +3,84 @@ package repository
 import (
 	"context"
 	"fmt"
+	"time"
 
-	"github.com/go-pg/pg/v10"
+	"github.com/jackc/pgx/v5/pgxpool"
 
-	"microservice-template/config"
-	"microservice-template/pkg/logger"
+	"github.com/asolovov/evm-oracle-demo-indexer-service/config"
 )
 
-// Module implements module.Module interface for repository layer.
-// It manages database connection lifecycle and provides repository instances.
+// Module integrates the Repository into the App's module.Manager
+// lifecycle so app start/stop cleanly opens and drains the pool.
 type Module struct {
-	config *config.DatabaseConfig
-	db     *pg.DB
-	repo   IRepository
+	cfg  *config.DatabaseConfig
+	pool *pgxpool.Pool
+	repo *Repository
 }
 
-// NewModule creates a new repository module instance.
-func NewModule(cfg *config.DatabaseConfig) *Module {
-	return &Module{
-		config: cfg,
+// NewModule creates an unstarted Module.
+func NewModule(cfg *config.DatabaseConfig) *Module { return &Module{cfg: cfg} }
+
+// Name implements module.Module.
+func (m *Module) Name() string { return "repository" }
+
+// Init opens the pgx pool and pings it.
+func (m *Module) Init(ctx context.Context) error {
+	if m.cfg == nil {
+		return fmt.Errorf("repository module: database config is required")
 	}
-}
-
-// Name returns the module identifier.
-func (m *Module) Name() string {
-	return "repository"
-}
-
-// Init initializes the repository module and establishes database connection.
-func (m *Module) Init(_ context.Context) error {
-	logger.Log().Infof("initializing %s module with driver: %s on %s:%d with user %s", m.Name(), m.config.Driver, m.config.Host, m.config.Port, m.config.User)
-
-	fmt.Println(m.config.User)
-	fmt.Println(m.config.Password)
-	fmt.Println(m.config.Name)
-
-	db := pg.Connect(&pg.Options{
-		Addr:         fmt.Sprintf("%s:%d", m.config.Host, m.config.Port),
-		User:         m.config.User,
-		Password:     m.config.Password,
-		Database:     m.config.Name,
-		PoolSize:     m.config.MaxOpenConns,
-		MinIdleConns: m.config.MaxIdleConns,
-	})
-
-	m.db = db
-	m.repo = NewPostgresRepository(db)
-
-	if err := m.HealthCheck(context.Background()); err != nil {
-		return fmt.Errorf("failed to connect to database: %w", err)
+	cfg, err := pgxpool.ParseConfig(buildDSN(m.cfg))
+	if err != nil {
+		return fmt.Errorf("parse db config: %w", err)
+	}
+	if m.cfg.MaxOpenConns > 0 {
+		cfg.MaxConns = int32(m.cfg.MaxOpenConns) //nolint:gosec // small bounded value.
+	}
+	if m.cfg.MaxIdleConns > 0 {
+		cfg.MinConns = int32(m.cfg.MaxIdleConns) //nolint:gosec // small bounded value.
+	}
+	if m.cfg.ConnMaxLifetime > 0 {
+		cfg.MaxConnLifetime = time.Duration(m.cfg.ConnMaxLifetime) * time.Second
 	}
 
-	logger.Log().Infof("%s module initialized successfully", m.Name())
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		return fmt.Errorf("connect to evm_indexer: %w", err)
+	}
+	if err := pool.Ping(ctx); err != nil {
+		pool.Close()
+		return fmt.Errorf("ping evm_indexer: %w", err)
+	}
+	m.pool = pool
+	m.repo = New(pool)
 	return nil
 }
 
-// Start begins module operation (no-op for repository).
-func (m *Module) Start(_ context.Context) error {
-	logger.Log().Infof("starting %s module", m.Name())
-	return nil
-}
+// Start is a no-op — the pool is already active after Init.
+func (m *Module) Start(_ context.Context) error { return nil }
 
-// Stop gracefully shuts down the module and closes database connection.
+// Stop closes the pool.
 func (m *Module) Stop(_ context.Context) error {
-	logger.Log().Infof("stopping %s module", m.Name())
-
-	if m.db != nil {
-		if err := m.db.Close(); err != nil {
-			return fmt.Errorf("close database connection: %w", err)
-		}
-		logger.Log().Info("database connection closed")
+	if m.pool != nil {
+		m.pool.Close()
 	}
-
 	return nil
 }
 
-// HealthCheck verifies database connectivity.
+// HealthCheck pings the pool.
 func (m *Module) HealthCheck(ctx context.Context) error {
-	if m.db == nil {
-		return fmt.Errorf("database not initialized")
+	if m.pool == nil {
+		return fmt.Errorf("repository module not initialized")
 	}
-
-	if _, err := m.db.WithContext(ctx).Exec("SELECT 1"); err != nil {
-		return fmt.Errorf("database health check failed: %w", err)
-	}
-
-	return nil
+	return m.pool.Ping(ctx)
 }
 
-// Repository returns the repository instance.
-// This is used by other parts of the application (e.g., Service layer).
-func (m *Module) Repository() IRepository {
-	return m.repo
+// Repository exposes the typed repository for downstream modules.
+func (m *Module) Repository() *Repository { return m.repo }
+
+func buildDSN(cfg *config.DatabaseConfig) string {
+	return fmt.Sprintf(
+		"postgres://%s:%s@%s:%d/%s?sslmode=%s",
+		cfg.User, cfg.Password, cfg.Host, cfg.Port, cfg.Name, cfg.SSLMode,
+	)
 }
