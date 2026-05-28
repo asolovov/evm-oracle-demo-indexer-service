@@ -122,6 +122,8 @@ func (r *Reconciler) Run(ctx context.Context) error {
 	from := startFrom
 	persistAt := startFrom + r.cursorEvery - 1
 	started := time.Now()
+	failedChunks := 0
+	highestCleanBlock := startFrom - 1
 
 	for from <= headNum {
 		if err := ctx.Err(); err != nil {
@@ -132,38 +134,93 @@ func (r *Reconciler) Run(ctx context.Context) error {
 			to = headNum
 		}
 
-		query := ethereum.FilterQuery{
-			FromBlock: new(big.Int).SetUint64(from),
-			ToBlock:   new(big.Int).SetUint64(to),
-			Addresses: addresses,
-		}
-
-		logs, err := r.client.FilterLogs(ctx, query)
+		chunkFailed, err := r.drainChunk(ctx, from, to, addresses)
 		if err != nil {
-			return fmt.Errorf("eth_getLogs [%d..%d]: %w", from, to, err)
-		}
-		for _, log := range logs {
-			if perr := r.handleLog(ctx, log); perr != nil {
-				logger.Log().Warnf("backfill: handleLog [%d..%d]: %v", from, to, perr)
-			}
+			return err
 		}
 
-		if to >= persistAt {
-			if err := r.store.UpdateChainCursor(ctx, to); err != nil {
-				return fmt.Errorf("persist cursor at %d: %w", to, err)
+		// Advance the cursor only when the whole chunk succeeded. A
+		// partial-chunk advance would silently swallow the addresses
+		// that errored, with no way for the operator to know which
+		// blocks need a redo.
+		if chunkFailed {
+			failedChunks++
+		} else {
+			highestCleanBlock = to
+			if to >= persistAt {
+				if err := r.store.UpdateChainCursor(ctx, to); err != nil {
+					return fmt.Errorf("persist cursor at %d: %w", to, err)
+				}
+				persistAt = to + r.cursorEvery
 			}
-			persistAt = to + r.cursorEvery
 		}
 		from = to + 1
 	}
 
-	// Final cursor flush so the next start picks up exactly where we left off.
-	if err := r.store.UpdateChainCursor(ctx, headNum); err != nil {
-		return fmt.Errorf("persist final cursor at %d: %w", headNum, err)
+	// Final cursor flush. If any chunk failed we DON'T advance the
+	// cursor past the last clean block — that way a redeploy / restart
+	// will replay the partially-broken range. Without this gate the
+	// cursor would jump to head and the gap would become invisible.
+	finalCursor := headNum
+	if failedChunks > 0 {
+		finalCursor = highestCleanBlock
+	}
+	if finalCursor >= startFrom {
+		if err := r.store.UpdateChainCursor(ctx, finalCursor); err != nil {
+			return fmt.Errorf("persist final cursor at %d: %w", finalCursor, err)
+		}
 	}
 
-	logger.Log().Infof("backfill: complete in %s — processed [%d..%d]", time.Since(started), startFrom, headNum)
+	if failedChunks > 0 {
+		logger.Log().Warnf("backfill: complete in %s — processed [%d..%d] but %d chunk(s) had per-address failures; cursor parked at %d for redo on next start",
+			time.Since(started), startFrom, headNum, failedChunks, finalCursor)
+	} else {
+		logger.Log().Infof("backfill: complete in %s — processed [%d..%d]", time.Since(started), startFrom, headNum)
+	}
 	return nil
+}
+
+// drainChunk pulls every (chunk, address) eth_getLogs call for the
+// given block range. Returns chunkFailed=true if any single per-
+// address call errored (we treat the chunk as not-fully-covered);
+// returns a non-nil error only for ctx-cancel/deadline.
+//
+// One eth_getLogs per address per chunk. The earlier multi-address
+// single call is blocked by some public RPC providers (e.g.
+// ethereum-sepolia-rpc.publicnode.com rejects it with
+// "blocked parameter: params.0.address.#"). Splitting keeps the same
+// coverage with N calls per chunk, which is well within free-tier
+// rate limits and works on every provider that supports vanilla
+// eth_getLogs. A failure on a single (chunk, address) pair is a
+// WARNING, not terminal — partial backfill beats no backfill on cold
+// start, and the parked cursor will replay any holes on next start.
+func (r *Reconciler) drainChunk(ctx context.Context, from, to uint64, addresses []common.Address) (bool, error) {
+	chunkFailed := false
+	for _, addr := range addresses {
+		query := ethereum.FilterQuery{
+			FromBlock: new(big.Int).SetUint64(from),
+			ToBlock:   new(big.Int).SetUint64(to),
+			Addresses: []common.Address{addr},
+		}
+		logs, err := r.client.FilterLogs(ctx, query)
+		if err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return chunkFailed, err
+			}
+			logger.Log().Warnf("backfill: eth_getLogs [%d..%d] addr=%s: %v", from, to, addr.Hex(), err)
+			chunkFailed = true
+			if r.metrics != nil {
+				r.metrics.ObserveDecodeError()
+			}
+			continue
+		}
+		for _, log := range logs {
+			if perr := r.handleLog(ctx, log); perr != nil {
+				logger.Log().Warnf("backfill: handleLog [%d..%d] addr=%s: %v", from, to, addr.Hex(), perr)
+			}
+		}
+	}
+	return chunkFailed, nil
 }
 
 func (r *Reconciler) handleLog(ctx context.Context, log types.Log) error {

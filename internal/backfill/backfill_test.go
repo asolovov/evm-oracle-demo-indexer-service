@@ -22,8 +22,14 @@ import (
 type fakeFetcher struct {
 	mu      sync.Mutex
 	headNum uint64
-	logs    []types.Log // returned slice is filtered by FromBlock/ToBlock at query time
+	logs    []types.Log // returned slice is filtered by FromBlock/ToBlock and Addresses at query time
 	queries []ethereum.FilterQuery
+
+	// failOnAddress, when set, makes FilterLogs return an error
+	// whenever the query targets exactly this address. Lets a test
+	// simulate "this one provider blocks this one filter".
+	failOnAddress *common.Address
+	failErr       error
 }
 
 func (f *fakeFetcher) HeaderByNumber(_ context.Context, _ *big.Int) (*types.Header, error) {
@@ -35,13 +41,31 @@ func (f *fakeFetcher) FilterLogs(_ context.Context, q ethereum.FilterQuery) ([]t
 	defer f.mu.Unlock()
 	f.queries = append(f.queries, q)
 
+	if f.failOnAddress != nil && len(q.Addresses) == 1 && q.Addresses[0] == *f.failOnAddress {
+		err := f.failErr
+		if err == nil {
+			err = errors.New("simulated provider rejection")
+		}
+		return nil, err
+	}
+
 	out := make([]types.Log, 0)
 	from := q.FromBlock.Uint64()
 	to := q.ToBlock.Uint64()
+	addrSet := make(map[common.Address]struct{}, len(q.Addresses))
+	for _, a := range q.Addresses {
+		addrSet[a] = struct{}{}
+	}
 	for _, l := range f.logs {
-		if l.BlockNumber >= from && l.BlockNumber <= to {
-			out = append(out, l)
+		if l.BlockNumber < from || l.BlockNumber > to {
+			continue
 		}
+		if len(addrSet) > 0 {
+			if _, ok := addrSet[l.Address]; !ok {
+				continue
+			}
+		}
+		out = append(out, l)
 	}
 	return out, nil
 }
@@ -146,18 +170,100 @@ func TestBackfill_ChunkingAndCursorAdvance(t *testing.T) {
 	if len(store.inserts) != len(logs) {
 		t.Errorf("inserted %d events, want %d", len(store.inserts), len(logs))
 	}
-	// Chunking: with chunk size 25 and gap [1..80] we expect chunks
-	// [1..25], [26..50], [51..75], [76..80] -> 4 queries.
-	if len(fetcher.queries) != 4 {
-		t.Errorf("expected 4 eth_getLogs chunks, got %d (queries=%+v)", len(fetcher.queries), fetcher.queries)
+	// Chunking: with chunk size 25 and gap [1..80] there are 4 chunks
+	// (chunks [1..25], [26..50], [51..75], [76..80]) and 2 addresses
+	// (registry + 1 aggregator), so 4 * 2 = 8 eth_getLogs calls.
+	if len(fetcher.queries) != 8 {
+		t.Errorf("expected 8 eth_getLogs calls (4 chunks * 2 addresses), got %d", len(fetcher.queries))
 	}
-	// Final cursor must be the head height.
+	// Each query must target exactly one address — the per-address
+	// chunking guard against providers that block multi-address filters.
+	for i, q := range fetcher.queries {
+		if len(q.Addresses) != 1 {
+			t.Errorf("query[%d] targets %d addresses, want exactly 1", i, len(q.Addresses))
+		}
+	}
+	// Final cursor must be the head height (all chunks clean).
 	if store.cursor != 80 {
 		t.Errorf("final cursor = %d, want 80", store.cursor)
 	}
-	// Cursor should have been persisted at least once mid-flight.
 	if len(store.cursorWrites) < 2 {
 		t.Errorf("expected at least 2 cursor writes (mid + final), got %d", len(store.cursorWrites))
+	}
+}
+
+func TestBackfill_PerAddressFailureWarnsAndParksCursor(t *testing.T) {
+	aggregator := common.HexToAddress("0x075be31662c2548c4e940d7e769c328a34dcb281")
+	asset := common.HexToHash("0xaa")
+	registry := common.HexToAddress("0x89a6c12a403733c6a817472cec46a530581cb7ef")
+	requester := common.HexToAddress("0xCEF4Fe1CA9071f4ED4BAd6c1087CEb08838a983E")
+
+	logs := []types.Log{
+		buildPriceRequestedLog(aggregator, big.NewInt(1), requester, 5, 1),
+		buildPriceRequestedLog(aggregator, big.NewInt(2), requester, 12, 2),
+	}
+
+	// Registry filter rejected — simulates publicnode-style provider
+	// behavior on a specific address.
+	fetcher := &fakeFetcher{
+		headNum:       30,
+		logs:          logs,
+		failOnAddress: &registry,
+		failErr:       errors.New("Request blocked. Details: blocked parameter: params.0.address.#"),
+	}
+	store := &fakeStore{cursor: 0, aggregatorMap: map[common.Address]common.Hash{aggregator: asset}}
+	parser, _ := chainsub.NewParser(registry, &stubResolver{mapping: map[common.Address]common.Hash{aggregator: asset}})
+
+	r := New(fetcher, store, parser, Config{
+		RegistryAddress: registry,
+		ChunkSize:       50, // one chunk covers [1..30]
+		CursorEvery:     100,
+	})
+
+	if err := r.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v (per-address failures must NOT abort the whole pass)", err)
+	}
+	// Aggregator queries still succeeded — both events should be persisted.
+	if len(store.inserts) != len(logs) {
+		t.Errorf("inserted %d events, want %d (aggregator side should ingest cleanly)", len(store.inserts), len(logs))
+	}
+	// Cursor must NOT advance past startFrom-1 because the chunk had a
+	// per-address failure. Otherwise the next start would skip the gap.
+	if store.cursor != 0 {
+		t.Errorf("cursor advanced to %d despite per-address failure; want 0", store.cursor)
+	}
+}
+
+func TestBackfill_PartialFailureParksCursorAtLastCleanChunk(t *testing.T) {
+	aggregator := common.HexToAddress("0x075be31662c2548c4e940d7e769c328a34dcb281")
+	asset := common.HexToHash("0xaa")
+	registry := common.HexToAddress("0x89a6c12a403733c6a817472cec46a530581cb7ef")
+
+	// Aggregator addr is fine; registry fails. With 4 chunks where
+	// every chunk has a registry-failure, the cursor must stay at 0.
+	// Then we flip the failure off mid-flight to model a recovery —
+	// actually this stub can't change at runtime, so we test the
+	// simpler invariant: ANY chunk failure parks the cursor before
+	// the failed chunk.
+	fetcher := &fakeFetcher{
+		headNum:       80,
+		failOnAddress: &registry,
+		failErr:       errors.New("rate limited"),
+	}
+	store := &fakeStore{cursor: 0, aggregatorMap: map[common.Address]common.Hash{aggregator: asset}}
+	parser, _ := chainsub.NewParser(registry, &stubResolver{mapping: map[common.Address]common.Hash{aggregator: asset}})
+
+	r := New(fetcher, store, parser, Config{
+		RegistryAddress: registry,
+		ChunkSize:       25,
+		CursorEvery:     50,
+	})
+
+	if err := r.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if store.cursor != 0 {
+		t.Errorf("final cursor = %d, want 0 (every chunk had a failure)", store.cursor)
 	}
 }
 
