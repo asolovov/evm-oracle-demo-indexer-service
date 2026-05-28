@@ -32,6 +32,7 @@ import (
 	"google.golang.org/grpc/health"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/keepalive"
+	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/reflection"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -42,7 +43,28 @@ import (
 	"github.com/asolovov/evm-oracle-demo-indexer-service/internal/models"
 	"github.com/asolovov/evm-oracle-demo-indexer-service/internal/repository"
 	"github.com/asolovov/evm-oracle-demo-indexer-service/internal/streamhub"
+	"github.com/asolovov/evm-oracle-demo-indexer-service/pkg/logger"
 )
+
+// peerAddress extracts the client's network address from a gRPC
+// context. Returns "unknown" when the framework didn't attach peer
+// info (e.g. unit-test transports).
+func peerAddress(ctx context.Context) string {
+	p, ok := peer.FromContext(ctx)
+	if !ok || p == nil || p.Addr == nil {
+		return "unknown"
+	}
+	return p.Addr.String()
+}
+
+// formatAssetFilter renders a *common.Hash for log lines, printing
+// "any" when no asset filter is set.
+func formatAssetFilter(h *common.Hash) string {
+	if h == nil {
+		return "any"
+	}
+	return strings.ToLower(h.Hex())
+}
 
 // EventReader is the read surface ListEvents + GetRequest need.
 // Implemented by *repository.Repository in production.
@@ -234,6 +256,7 @@ func (s *Server) StreamEvents(req *indexerv1.StreamEventsRequest, stream indexer
 	}
 
 	ctx := stream.Context()
+	peerAddr := peerAddress(ctx)
 
 	// Subscribe BEFORE the historical replay so we don't miss events
 	// fired during the replay window. Live events that arrive while
@@ -244,7 +267,13 @@ func (s *Server) StreamEvents(req *indexerv1.StreamEventsRequest, stream indexer
 	if sub == nil {
 		return status.Error(codes.Unavailable, "indexer-service is shutting down")
 	}
-	defer sub.Cancel()
+	defer func() {
+		sub.Cancel()
+		logger.Log().Infof("grpcsrv: StreamEvents disconnect id=%d peer=%s", sub.ID(), peerAddr)
+	}()
+
+	logger.Log().Infof("grpcsrv: StreamEvents subscribe id=%d peer=%s kinds=%v asset_id=%s from_block=%d",
+		sub.ID(), peerAddr, hubFilter.Kinds, formatAssetFilter(hubFilter.AssetID), req.GetFromBlock())
 
 	highestReplayed := uint64(0)
 
