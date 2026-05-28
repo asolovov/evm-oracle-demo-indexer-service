@@ -215,8 +215,14 @@ func (s *Subscriber) handleLog(ctx context.Context, rpc *ethclient.Client, log t
 	if err != nil {
 		return fmt.Errorf("persist event: %w", err)
 	}
-	if inserted && s.metrics != nil {
-		s.metrics.ObserveSeen(evt.Kind)
+	if inserted {
+		if s.metrics != nil {
+			s.metrics.ObserveSeen(evt.Kind)
+		}
+		// Chronicle line — one per first-time-seen event. Replays
+		// (already-known tx_hash/log_index) are silent.
+		logger.Log().Infof("chainsub: seen %s asset=%s block=%d log_index=%d tx=%s",
+			evt.Kind, shortHash(evt.AssetID.Hex()), evt.BlockNumber, evt.LogIndex, shortHash(evt.TxHash.Hex()))
 	}
 	return nil
 }

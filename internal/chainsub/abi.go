@@ -15,3 +15,13 @@ func abiFromJSON(s string) (*abi.ABI, error) {
 	}
 	return &parsed, nil
 }
+
+// shortHash trims a 0x-prefixed hex string to "0xabcd…ef01" so log
+// lines stay scannable without losing identity. Inputs shorter than
+// 14 characters pass through unchanged.
+func shortHash(h string) string {
+	if len(h) < 14 {
+		return h
+	}
+	return h[:6] + "…" + h[len(h)-4:]
+}

@@ -19,7 +19,18 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 
 	"github.com/asolovov/evm-oracle-demo-indexer-service/internal/models"
+	"github.com/asolovov/evm-oracle-demo-indexer-service/pkg/logger"
 )
+
+// shortHash trims a 0x-prefixed hex string for compact log lines.
+// Duplicated from chainsub (same shape) to keep confirmer free of
+// cross-package dependencies for a one-line helper.
+func shortHash(h string) string {
+	if len(h) < 14 {
+		return h
+	}
+	return h[:6] + "…" + h[len(h)-4:]
+}
 
 // EventStore is the persistence surface the confirmer needs.
 type EventStore interface {
@@ -206,6 +217,8 @@ func (c *Confirmer) process(ctx context.Context, evt *models.Event, headNum uint
 		if c.metrics != nil {
 			c.metrics.ObserveOrphaned(evt.Kind)
 		}
+		logger.Log().Warnf("confirmer: orphaned %s id=%d block=%d original_hash=%s canonical_hash=%s",
+			evt.Kind, evt.ID, evt.BlockNumber, shortHash(evt.BlockHash.Hex()), shortHash(canonicalHeader.Hash().Hex()))
 		return nil
 	}
 
@@ -230,12 +243,15 @@ func (c *Confirmer) process(ctx context.Context, evt *models.Event, headNum uint
 
 	// Did we just cross the threshold?
 	if priorConfirmations < c.threshold && newConfirmations >= c.threshold {
+		var subscribers int
 		if c.publisher != nil {
-			c.publisher.Publish(evt)
+			subscribers = c.publisher.Publish(evt)
 		}
 		if c.metrics != nil {
 			c.metrics.ObserveConfirmed(evt.Kind)
 		}
+		logger.Log().Infof("confirmer: confirmed %s id=%d block=%d depth=%d -> published to %d subscriber(s)",
+			evt.Kind, evt.ID, evt.BlockNumber, depth, subscribers)
 	}
 	return nil
 }
