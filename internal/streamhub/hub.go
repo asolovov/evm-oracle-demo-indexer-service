@@ -1,13 +1,11 @@
 // Package streamhub is the in-memory pub/sub at the heart of the
-// indexer's StreamEvents server. It IS the confirmation gate — events
-// only flow through the hub once the confirmer has marked them final
-// (confirmations >= N, orphaned == false). Subscribers (oracle-service
-// + rest-api) get a clean post-confirmation feed and never see
-// in-flight or re-orged events.
+// indexer's StreamEvents server. chainsub publishes each event the
+// moment it is persisted (emit-on-ingest), and the hub fans it out to
+// connected subscribers (oracle-service + api) filtered per-client.
 //
 // Slow consumers are dropped on overflow rather than allowed to block
 // the publish path, so a stalled subscriber can't stall the rest of
-// the system.
+// the system. Total subscribers are capped (see defaultMaxSubscribers).
 package streamhub
 
 import (

@@ -1,7 +1,5 @@
 // Package repository provides the pgx-backed persistence layer for
-// indexer-service. Wires only the `events`, `chain_cursor`, and
-// `aggregator_registry` tables — no ORM, raw SQL with pgx.Batch when
-// it matters.
+// indexer-service. The only table is `events` — no ORM, raw SQL.
 package repository
 
 import (

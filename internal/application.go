@@ -134,7 +134,7 @@ func (app *App) Serve() error {
 	runtimeCtx, cancel := context.WithCancel(context.Background())
 	app.cancelRuntime = cancel
 
-	// chainsub owns its own connect/catch-up/live/reconnect lifecycle.
+	// chainsub owns its own connect/live/reconnect lifecycle.
 	app.runtimeWG.Add(1)
 	go func() {
 		defer app.runtimeWG.Done()

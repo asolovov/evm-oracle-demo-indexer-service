@@ -1,19 +1,18 @@
 // Package grpcsrv hosts the indexer-service gRPC server +
 // IndexerService implementation. Three RPCs:
 //
-//   - ListEvents — paginated historical query with kind/asset/block
-//     filters. Excludes orphaned + sub-threshold events. Sorted
-//     desc by (block_number, log_index).
+//   - ListEvents — paginated query with kind/asset/block filters,
+//     sorted desc by (block_number, log_index).
 //
 //   - GetRequest — joins PriceRequested + PriceFulfilled by req_id,
 //     returns lifecycle + tx hashes + last-known fulfillment price.
 //
 //   - StreamEvents — long-lived server stream. Replay-then-live: if
 //     `from_block > 0` the server first drains the matching backlog
-//     in chronological order, then attaches to the live stream hub.
-//     With `from_block = 0` it's live-only. The hub is the
-//     confirmation gate, so subscribers never see in-flight or
-//     re-orged events.
+//     in chronological order, then attaches to the live stream hub
+//     (with log-granular (block, log_index) dedup at the boundary).
+//     With `from_block = 0` it's live-only. Events are emitted on
+//     ingest — there is no confirmation gate.
 package grpcsrv
 
 import (

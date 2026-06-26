@@ -1,9 +1,9 @@
-// Package chainsub is the WebSocket subscription layer. It watches a
-// single chain for every registered PriceAggregator + the
-// OracleRegistry, decodes logs into domain events, and hands them to
-// the persistence pipeline. It deliberately does NOT do confirmation
-// gating — that's the confirmer's job. Newly seen events land in the
-// DB with confirmations=0; the confirmer ticks them up.
+// Package chainsub is the live WebSocket subscription layer. It watches
+// a single chain for the configured PriceAggregators + the
+// OracleRegistry, decodes logs into domain events, persists them, and
+// publishes each the moment it is persisted (emit-on-ingest — no
+// confirmation gate). Live-only: the sole chain operation is the WS log
+// subscription.
 package chainsub
 
 import (
@@ -52,10 +52,11 @@ type Parser struct {
 var ErrUnknownEvent = errors.New("unknown event signature")
 
 // ErrAssetIDUnknown is returned when the parser can't resolve the
-// emitting aggregator to a known asset_id. The caller should still
-// persist the event (with empty asset_id) so reconciliation can fix
-// it later, but should log a warning.
-var ErrAssetIDUnknown = errors.New("aggregator address not in registry mapping")
+// emitting aggregator to a known asset_id (it isn't in the configured
+// asset set and hasn't been seen via a live AssetRegistered). The
+// caller still persists the event with empty asset_id and logs a
+// warning.
+var ErrAssetIDUnknown = errors.New("aggregator address not in asset mapping")
 
 // NewParser constructs a Parser. `registry` is the OracleRegistry
 // address used to discriminate registry-emitted logs from aggregator-
@@ -106,8 +107,8 @@ func (p *Parser) parsePriceRequested(log types.Log) (*models.Event, error) {
 	}
 	asset, ok := p.resolver.AssetIDFor(log.Address)
 	if !ok {
-		// Persist with empty asset_id so reconciliation can fill it
-		// in later; surface to the caller as a warning.
+		// Persist with empty asset_id; surface to the caller as a
+		// warning (the aggregator isn't in the configured asset set).
 		return p.buildPriceRequested(log, raw, common.Hash{}, ErrAssetIDUnknown)
 	}
 	return p.buildPriceRequested(log, raw, asset, nil)

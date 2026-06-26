@@ -160,13 +160,23 @@ func Validate(s *Scheme) error {
 		if len(s.Indexer.Assets) == 0 {
 			errs = append(errs, "indexer.assets must list at least one asset")
 		}
+		seenAgg := make(map[string]struct{}, len(s.Indexer.Assets))
 		for i, a := range s.Indexer.Assets {
 			if !isHexHash(a.AssetID) {
 				errs = append(errs, fmt.Sprintf("indexer.assets[%d].asset_id must be a 0x-prefixed 32-byte hex", i))
 			}
 			if !isHexAddress(a.Aggregator) {
 				errs = append(errs, fmt.Sprintf("indexer.assets[%d].aggregator must be a 0x-prefixed 20-byte hex address", i))
+				continue
 			}
+			// One aggregator -> one asset. A duplicate would silently
+			// overwrite in the in-memory mapping (last wins), mislabeling
+			// that aggregator's price logs.
+			key := strings.ToLower(a.Aggregator)
+			if _, dup := seenAgg[key]; dup {
+				errs = append(errs, fmt.Sprintf("indexer.assets[%d].aggregator %s is listed more than once", i, a.Aggregator))
+			}
+			seenAgg[key] = struct{}{}
 		}
 	}
 
