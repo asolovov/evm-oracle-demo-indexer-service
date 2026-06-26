@@ -59,8 +59,6 @@ func setDefaults() {
 	viper.SetDefault("chain.backfill_from_block", uint64(0))
 
 	// Indexer knobs.
-	viper.SetDefault("indexer.confirmations", uint32(5))
-	viper.SetDefault("indexer.reorg_check_interval_sec", uint32(10))
 	viper.SetDefault("indexer.backfill_chunk_size", uint64(1000))
 	viper.SetDefault("indexer.stream_subscriber_buffer", 256)
 
@@ -103,14 +101,8 @@ func Validate(s *Scheme) error {
 	if s.Indexer == nil {
 		errs = append(errs, "indexer block is required")
 	} else {
-		if s.Indexer.Confirmations == 0 {
-			errs = append(errs, "indexer.confirmations must be >= 1")
-		}
-		if s.Indexer.ReorgCheckIntervalSec == 0 {
-			errs = append(errs, "indexer.reorg_check_interval_sec must be >= 1")
-		}
-		if s.Indexer.BackfillChunkSize == 0 {
-			errs = append(errs, "indexer.backfill_chunk_size must be >= 1")
+		if s.Indexer.BackfillChunkSize == 0 || s.Indexer.BackfillChunkSize > 10_000 {
+			errs = append(errs, "indexer.backfill_chunk_size must be in [1, 10000]")
 		}
 		if s.Indexer.StreamSubscriberBuffer <= 0 {
 			errs = append(errs, "indexer.stream_subscriber_buffer must be >= 1")

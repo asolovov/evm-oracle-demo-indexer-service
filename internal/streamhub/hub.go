@@ -96,12 +96,19 @@ func (s *Subscription) Cancel() {
 // applications wire it up to metrics + logs.
 type DropFunc func(id uint64, reason DropReason)
 
+// defaultMaxSubscribers bounds concurrent StreamEvents subscribers so
+// an abusive/buggy consumer on the unauthenticated internal port can't
+// exhaust memory (each subscriber holds a buffered channel and every
+// Publish iterates them all).
+const defaultMaxSubscribers = 256
+
 // Hub is the central fan-out. Goroutine-safe.
 type Hub struct {
 	mu       sync.RWMutex
 	subs     map[uint64]*Subscription
 	nextID   atomic.Uint64
 	bufSize  int
+	maxSubs  int
 	onDrop   DropFunc
 	shutdown atomic.Bool
 }
@@ -115,12 +122,14 @@ func New(bufSize int, onDrop DropFunc) *Hub {
 	return &Hub{
 		subs:    make(map[uint64]*Subscription),
 		bufSize: bufSize,
+		maxSubs: defaultMaxSubscribers,
 		onDrop:  onDrop,
 	}
 }
 
 // Subscribe registers a new consumer with the supplied filter and
-// returns a Subscription. After Shutdown returns nil.
+// returns a Subscription. Returns nil after Shutdown OR when the
+// subscriber cap is reached (the caller maps nil to gRPC Unavailable).
 func (h *Hub) Subscribe(filter Filter) *Subscription {
 	if h.shutdown.Load() {
 		return nil
@@ -135,6 +144,10 @@ func (h *Hub) Subscribe(filter Filter) *Subscription {
 	}
 
 	h.mu.Lock()
+	if len(h.subs) >= h.maxSubs {
+		h.mu.Unlock()
+		return nil
+	}
 	h.subs[id] = sub
 	h.mu.Unlock()
 	return sub

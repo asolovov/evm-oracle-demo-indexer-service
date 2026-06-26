@@ -29,7 +29,7 @@ type fakeReader struct {
 	queries  []repository.ListEventsFilter
 }
 
-func (f *fakeReader) ListEvents(_ context.Context, q repository.ListEventsFilter, _ uint32) ([]*models.Event, error) {
+func (f *fakeReader) ListEvents(_ context.Context, q repository.ListEventsFilter) ([]*models.Event, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.queries = append(f.queries, q)
@@ -70,7 +70,7 @@ func (f *fakeReader) ListEvents(_ context.Context, q repository.ListEventsFilter
 	return out, nil
 }
 
-func (f *fakeReader) EventsForRequest(_ context.Context, reqID *big.Int, _ uint32) ([]*models.Event, error) {
+func (f *fakeReader) EventsForRequest(_ context.Context, reqID *big.Int) ([]*models.Event, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.forReq[reqID.String()], nil
@@ -119,7 +119,7 @@ func startTestServer(t *testing.T, reader EventReader, hub StreamHub) (indexerv1
 		Port:           0,
 		MaxRecvMsgSize: 4 * 1024 * 1024,
 		MaxSendMsgSize: 4 * 1024 * 1024,
-	}, reader, hub, 5)
+	}, reader, hub)
 
 	if err := srv.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -312,5 +312,51 @@ func TestStreamEvents_ReplayThenLive(t *testing.T) {
 	}
 	if live.Meta.BlockNumber != 200 {
 		t.Errorf("live block = %d, want 200", live.Meta.BlockNumber)
+	}
+}
+
+// A live event in the SAME block as the replay boundary but at a higher
+// log_index must still be delivered, while an exact re-delivery of a
+// replayed (block, log_index) must be suppressed. Block-granular dedup
+// would get one of these wrong.
+func TestStreamEvents_LogGranularBoundaryDedup(t *testing.T) {
+	asset := common.HexToHash("0xa1")
+	// Replay boundary: a Fulfilled event at block 105, log_index 2.
+	reader := &fakeReader{list: []*models.Event{
+		sampleEvent(2, 105, models.EventKindPriceFulfilled, asset),
+	}}
+	hub := streamhub.New(8, nil)
+	defer hub.Shutdown()
+	cli, cleanup := startTestServer(t, reader, hub)
+	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	stream, err := cli.StreamEvents(ctx, &indexerv1.StreamEventsRequest{FromBlock: 105})
+	if err != nil {
+		t.Fatalf("StreamEvents: %v", err)
+	}
+	// Drain the replay event (block 105, log_index 2).
+	if _, err := stream.Recv(); err != nil {
+		t.Fatalf("replay Recv: %v", err)
+	}
+
+	// Re-deliver the exact boundary event live — must be suppressed.
+	hub.Publish(sampleEvent(2, 105, models.EventKindPriceFulfilled, asset))
+	// A higher log_index in the SAME block — must be delivered.
+	hub.Publish(sampleEvent(7, 105, models.EventKindPriceRequested, asset))
+
+	got, err := stream.Recv()
+	if err != nil {
+		t.Fatalf("live Recv: %v", err)
+	}
+	// If block-granular dedup leaked the duplicate, we'd get the
+	// Fulfilled (log_index 2) here instead of the PriceRequested.
+	if got.GetPriceRequested() == nil {
+		t.Errorf("expected the higher-log_index PriceRequested, got %+v", got)
+	}
+	if got.Meta.BlockNumber != 105 || got.Meta.LogIndex != 7 {
+		t.Errorf("got block=%d log_index=%d, want 105/7", got.Meta.BlockNumber, got.Meta.LogIndex)
 	}
 }

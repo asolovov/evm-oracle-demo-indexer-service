@@ -20,9 +20,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 
 	"github.com/asolovov/evm-oracle-demo-indexer-service/config"
-	"github.com/asolovov/evm-oracle-demo-indexer-service/internal/backfill"
 	"github.com/asolovov/evm-oracle-demo-indexer-service/internal/chainsub"
-	"github.com/asolovov/evm-oracle-demo-indexer-service/internal/confirmer"
 	"github.com/asolovov/evm-oracle-demo-indexer-service/internal/grpcsrv"
 	"github.com/asolovov/evm-oracle-demo-indexer-service/internal/healthz"
 	"github.com/asolovov/evm-oracle-demo-indexer-service/internal/metrics"
@@ -39,12 +37,12 @@ type App struct {
 	version *version.Version
 	modules *module.Manager
 
-	// Owned subsystems (kept on App so Stop can drain them in the
-	// right order independently of the module.Manager).
-	chainsub  *chainsub.Subscriber
-	confirmer *confirmer.Confirmer
-	backfill  *backfill.Reconciler
-	hub       *streamhub.Hub
+	// chainsub is the one background goroutine the App owns directly
+	// (it is not a module.Module — it has its own connect/reconnect
+	// lifecycle). The hub is shared between chainsub (publisher) and
+	// the gRPC server (subscriber source).
+	chainsub *chainsub.Subscriber
+	hub      *streamhub.Hub
 
 	cancelRuntime context.CancelFunc
 	runtimeWG     sync.WaitGroup
@@ -63,15 +61,13 @@ func NewApplication() (*App, error) {
 	}, nil
 }
 
-// Init constructs and registers every module. Splits cleanly into:
+// Init constructs and registers everything:
 //
 //  1. Validate config (fail fast, architecture rule 6).
-//  2. Repository module (Init opens the pgx pool).
-//  3. Build stream hub + confirmer + chainsub + backfill (plain
-//     packages — these are not module.Module instances; their
-//     goroutines are managed by the App's Run/Stop pair).
-//  4. gRPC server module.
-//  5. Healthz module — its readyz walks the module graph.
+//  2. Repository module (opens the pgx pool).
+//  3. Stream hub (shared) + chainsub (owns the chain client in one
+//     goroutine; catches up then live-subscribes; emits on ingest).
+//  4. gRPC server module + healthz module.
 func (app *App) Init() error {
 	if err := config.Validate(app.config); err != nil {
 		return fmt.Errorf("config: %w", err)
@@ -79,7 +75,7 @@ func (app *App) Init() error {
 
 	mts := metrics.New()
 
-	// 1. Repository
+	// 1. Repository.
 	repoModule := repository.NewModule(app.config.Database)
 	app.modules.Register(repoModule)
 	if err := repoModule.Init(context.Background()); err != nil {
@@ -87,26 +83,24 @@ func (app *App) Init() error {
 	}
 	repo := repoModule.Repository()
 
-	// 2. Stream hub.
+	// 2. Stream hub — fed by chainsub, consumed by the gRPC server.
 	app.hub = streamhub.New(app.config.Indexer.StreamSubscriberBuffer, mts.HubDrop())
 
-	// 3. Chain subscriber (does NOT dial yet; Run() dials on first
-	//    iteration). Confirmer + Backfill use the subscriber's
-	//    *ethclient.Client after Run() opens it.
-	regAddr := common.HexToAddress(app.config.Chain.RegistryAddress)
-	app.chainsub = chainsub.New(repo, chainsub.Config{
+	// 3. Chain subscriber. Owns its client end-to-end (no sharing →
+	//    no data race). Publishes each persisted event to the hub.
+	app.chainsub = chainsub.New(repo, app.hub, chainsub.Config{
 		WSURL:           app.config.Chain.WSURL,
 		RPCURL:          app.config.Chain.RPCURL,
-		RegistryAddress: regAddr,
-		ReconnectWait:   2 * time.Second,
+		RegistryAddress: common.HexToAddress(app.config.Chain.RegistryAddress),
+		DefaultStart:    app.config.Chain.BackfillFromBlock,
+		ChunkSize:       app.config.Indexer.BackfillChunkSize,
 		Metrics:         metrics.Chainsub{R: mts},
 	})
 
-	// 4. gRPC server.
-	srv := grpcsrv.New(app.config.GRPC, repo, app.hub, app.config.Indexer.Confirmations)
+	// 4. gRPC server + healthz.
+	srv := grpcsrv.New(app.config.GRPC, repo, app.hub)
 	app.modules.Register(grpcsrv.NewModule(srv))
 
-	// 5. Healthz.
 	authorMeta := map[string]string{
 		"version": app.version.String(),
 		"name":    "evm-oracle-demo-indexer-service",
@@ -118,42 +112,17 @@ func (app *App) Init() error {
 		return fmt.Errorf("init healthz: %w", err)
 	}
 
-	app.runtime(mts)
 	return nil
 }
 
-// runtime captures the metrics surface for the background goroutines
-// that Run() will launch in Serve().
-func (app *App) runtime(mts *metrics.Registry) {
-	app.confirmer = confirmer.New(nil, nil, app.hub, confirmer.Config{
-		Threshold:  app.config.Indexer.Confirmations,
-		Interval:   time.Duration(app.config.Indexer.ReorgCheckIntervalSec) * time.Second,
-		BatchLimit: 500,
-		Metrics:    metrics.Confirmer{R: mts},
-	})
-	// repo + chain client get injected at Serve time after the
-	// chainsub goroutine dials.
-
-	_ = mts // metrics registry is captured by every collector already.
-}
-
-// Serve starts everything in order. Returns when a signal terminates
-// the process or the runtime goroutines exit.
-//
-// Lifecycle:
-//
-//   - chainsub.Run goroutine: dials WS+RPC, drains logs into the
-//     repo, maintains the aggregator->asset mapping.
-//   - backfill (one-shot): waits for chainsub to dial, then runs
-//     the gap-fill pass against the same RPC client.
-//   - confirmer.Run goroutine: ticks every reorg_check_interval_sec.
-//   - module.Manager.StartAll: brings up the gRPC server + healthz.
+// Serve launches the chainsub goroutine and the transport modules, then
+// blocks until a termination signal arrives.
 func (app *App) Serve() error {
-	//nolint:gosec // cancel is stored in app.cancelRuntime and explicitly invoked from app.Stop; deferring here would terminate the runtime as soon as Serve returns (defeating the long-running design).
+	//nolint:gosec // cancel is stored in app.cancelRuntime and invoked from app.Stop; deferring here would kill the runtime the moment Serve returns.
 	runtimeCtx, cancel := context.WithCancel(context.Background())
 	app.cancelRuntime = cancel
 
-	// chainsub
+	// chainsub owns its own connect/catch-up/live/reconnect lifecycle.
 	app.runtimeWG.Add(1)
 	go func() {
 		defer app.runtimeWG.Done()
@@ -161,60 +130,6 @@ func (app *App) Serve() error {
 			logger.Log().Errorf("chainsub.Run: %v", err)
 		}
 	}()
-
-	// Wait briefly for the chainsub to dial so confirmer + backfill
-	// have a client to share. The first iteration of chainsub.Run
-	// must establish the client before backfill can borrow it; the
-	// gating is best-effort, not perfectly synchronous.
-	app.waitForChainClient(runtimeCtx, 30*time.Second)
-
-	if app.chainsub.Client() == nil {
-		logger.Log().Warn("chainsub never connected; backfill + confirmer running in degraded mode")
-	}
-
-	repoModule := app.findRepository()
-	if repoModule == nil {
-		return errors.New("repository module not registered")
-	}
-	repo := repoModule.Repository()
-
-	// Backfill (one-shot).
-	if app.chainsub.Client() != nil {
-		parser, err := chainsub.NewParser(common.HexToAddress(app.config.Chain.RegistryAddress), app.chainsub)
-		if err != nil {
-			logger.Log().Warnf("backfill: parser init failed: %v — skipping", err)
-		} else {
-			app.backfill = backfill.New(app.chainsub.Client(), repo, parser, backfill.Config{
-				RegistryAddress: common.HexToAddress(app.config.Chain.RegistryAddress),
-				DefaultStart:    app.config.Chain.BackfillFromBlock,
-				ChunkSize:       app.config.Indexer.BackfillChunkSize,
-			})
-			app.runtimeWG.Add(1)
-			go func() {
-				defer app.runtimeWG.Done()
-				if err := app.backfill.Run(runtimeCtx); err != nil {
-					logger.Log().Warnf("backfill: %v", err)
-				}
-			}()
-		}
-	}
-
-	// Confirmer.
-	if app.chainsub.Client() != nil {
-		// Re-build confirmer with the now-available chain client + repo.
-		app.confirmer = confirmer.New(repo, app.chainsub.Client(), app.hub, confirmer.Config{
-			Threshold:  app.config.Indexer.Confirmations,
-			Interval:   time.Duration(app.config.Indexer.ReorgCheckIntervalSec) * time.Second,
-			BatchLimit: 500,
-		})
-		app.runtimeWG.Add(1)
-		go func() {
-			defer app.runtimeWG.Done()
-			if err := app.confirmer.Run(runtimeCtx); err != nil {
-				logger.Log().Errorf("confirmer.Run: %v", err)
-			}
-		}()
-	}
 
 	// Transport: gRPC server + healthz.
 	if err := app.modules.StartAll(runtimeCtx); err != nil {
@@ -231,7 +146,7 @@ func (app *App) Serve() error {
 	return nil
 }
 
-// Stop cancels runtime goroutines and drains modules. Idempotent.
+// Stop cancels the runtime goroutine and drains modules. Idempotent.
 func (app *App) Stop() error {
 	if app.cancelRuntime != nil {
 		app.cancelRuntime()
@@ -253,7 +168,7 @@ func (app *App) Stop() error {
 	select {
 	case <-doneCh:
 	case <-stopCtx.Done():
-		logger.Log().Warn("runtime goroutines did not exit within 30s")
+		logger.Log().Warn("runtime goroutine did not exit within 30s")
 	}
 	return moduleErr
 }
@@ -266,32 +181,6 @@ func (app *App) Version() string { return app.version.String() }
 
 // Modules returns the module manager.
 func (app *App) Modules() *module.Manager { return app.modules }
-
-// waitForChainClient polls for chainsub.Client() to become non-nil.
-// Returns once the client is ready or the timeout elapses.
-func (app *App) waitForChainClient(ctx context.Context, timeout time.Duration) {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if app.chainsub.Client() != nil {
-			return
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(100 * time.Millisecond):
-		}
-	}
-}
-
-// findRepository walks the module manager for the repository module.
-func (app *App) findRepository() *repository.Module {
-	for _, m := range app.modules.List() {
-		if rm, ok := m.(*repository.Module); ok {
-			return rm
-		}
-	}
-	return nil
-}
 
 // readyAdapter translates module.Manager.HealthCheckAll's map into a
 // single non-nil error for healthz.ReadyChecker.

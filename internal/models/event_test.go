@@ -19,7 +19,6 @@ func sampleEvent(kind EventKind) *Event {
 		BlockNumber:     42,
 		LogIndex:        3,
 		ObservedAt:      time.Unix(1700000000, 0).UTC(),
-		Confirmations:   5,
 		AssetID:         common.HexToHash("0x0f8a193ff464434486c0daf7db2a895884365d2bc84ba47a68fcf89c1b14b5b8"),
 		ReqID:           big.NewInt(7),
 	}
@@ -65,8 +64,12 @@ func TestEventToProtoPriceRequested(t *testing.T) {
 	if pr.ReqId != "7" || pr.AssetId != "0x0f8a193ff464434486c0daf7db2a895884365d2bc84ba47a68fcf89c1b14b5b8" {
 		t.Errorf("unexpected proto fields: %+v", pr)
 	}
-	if p.Meta.Confirmations != 5 || p.Meta.BlockNumber != 42 {
-		t.Errorf("meta lost confirmations/block_number: %+v", p.Meta)
+	if p.Meta.BlockNumber != 42 {
+		t.Errorf("meta lost block_number: %+v", p.Meta)
+	}
+	// confirmations is vestigial post-gate-removal — always 0.
+	if p.Meta.Confirmations != 0 {
+		t.Errorf("meta.confirmations should be 0 (gate removed), got %d", p.Meta.Confirmations)
 	}
 }
 

@@ -31,8 +31,6 @@ func TestDefaultsRegistered(t *testing.T) {
 		{"healthz.port", 8080},
 		{"chain.name", "ethereum-sepolia"},
 		{"chain.chain_id", uint64(11155111)},
-		{"indexer.confirmations", uint32(5)},
-		{"indexer.reorg_check_interval_sec", uint32(10)},
 		{"indexer.backfill_chunk_size", uint64(1000)},
 		{"indexer.stream_subscriber_buffer", 256},
 		{"telemetry.log_level", "info"},
@@ -60,8 +58,6 @@ func TestValidate_AcceptsCompleteScheme(t *testing.T) {
 			BackfillFromBlock: 1,
 		},
 		Indexer: &IndexerConfig{
-			Confirmations:          5,
-			ReorgCheckIntervalSec:  10,
 			BackfillChunkSize:      1000,
 			StreamSubscriberBuffer: 256,
 		},
@@ -99,8 +95,6 @@ func TestValidate_RejectsBadRegistryAddress(t *testing.T) {
 			RegistryAddress: "not-an-address",
 		},
 		Indexer: &IndexerConfig{
-			Confirmations:          5,
-			ReorgCheckIntervalSec:  10,
 			BackfillChunkSize:      1000,
 			StreamSubscriberBuffer: 256,
 		},
