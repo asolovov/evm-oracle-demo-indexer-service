@@ -62,8 +62,6 @@ type Event struct {
 	BlockNumber     uint64
 	LogIndex        uint32
 	ObservedAt      time.Time
-	Confirmations   uint32
-	Orphaned        bool
 
 	// Denormalised lookup columns (also stored on the DB row for
 	// indexed queries — see `events.asset_id` / `events.req_id`).
@@ -92,7 +90,10 @@ func (e *Event) ToProto() (*indexerv1.Event, error) {
 		BlockNumber:     e.BlockNumber,
 		LogIndex:        e.LogIndex,
 		ObservedAt:      timestamppb.New(e.ObservedAt),
-		Confirmations:   e.Confirmations,
+		// confirmations is vestigial since the confirmation gate was
+		// removed (events emit on ingest). The proto field lives in the
+		// protocols subtree; populate 0 until a protocols PR drops it.
+		Confirmations: 0,
 	}
 
 	out := &indexerv1.Event{

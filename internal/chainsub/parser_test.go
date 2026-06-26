@@ -104,9 +104,6 @@ func TestParsePriceRequested_WithKnownAssetMapping(t *testing.T) {
 	if evt.PriceRequested.Requester != requester {
 		t.Errorf("Requester = %s, want %s", evt.PriceRequested.Requester.Hex(), requester.Hex())
 	}
-	if evt.Confirmations != 0 {
-		t.Errorf("freshly parsed event must have confirmations=0, got %d", evt.Confirmations)
-	}
 }
 
 func TestParsePriceRequested_UnknownAggregatorWarn(t *testing.T) {

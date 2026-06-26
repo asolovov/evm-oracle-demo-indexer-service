@@ -221,3 +221,28 @@ func TestHubPublishNilSafe(t *testing.T) {
 		t.Errorf("Publish(nil) returned %d, want 0", got)
 	}
 }
+
+func TestHubSubscriberCap(t *testing.T) {
+	hub := New(1, nil)
+	defer hub.Shutdown()
+	hub.maxSubs = 3 // shrink the cap for the test
+
+	subs := make([]*Subscription, 0, 3)
+	for i := 0; i < 3; i++ {
+		sub := hub.Subscribe(Filter{})
+		if sub == nil {
+			t.Fatalf("subscriber %d was rejected below the cap", i)
+		}
+		subs = append(subs, sub)
+	}
+	// The 4th must be rejected (nil → caller maps to Unavailable).
+	if sub := hub.Subscribe(Filter{}); sub != nil {
+		t.Error("expected nil once the subscriber cap is reached")
+	}
+
+	// Canceling one frees a slot.
+	subs[0].Cancel()
+	if sub := hub.Subscribe(Filter{}); sub == nil {
+		t.Error("expected a free slot after a cancel")
+	}
+}

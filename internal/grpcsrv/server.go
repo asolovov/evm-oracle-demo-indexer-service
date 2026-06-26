@@ -66,11 +66,14 @@ func formatAssetFilter(h *common.Hash) string {
 	return strings.ToLower(h.Hex())
 }
 
+// maxConcurrentStreams bounds concurrent gRPC streams per connection.
+const maxConcurrentStreams = 256
+
 // EventReader is the read surface ListEvents + GetRequest need.
 // Implemented by *repository.Repository in production.
 type EventReader interface {
-	ListEvents(ctx context.Context, f repository.ListEventsFilter, confirmations uint32) ([]*models.Event, error)
-	EventsForRequest(ctx context.Context, reqID *big.Int, confirmations uint32) ([]*models.Event, error)
+	ListEvents(ctx context.Context, f repository.ListEventsFilter) ([]*models.Event, error)
+	EventsForRequest(ctx context.Context, reqID *big.Int) ([]*models.Event, error)
 }
 
 // StreamHub is the publisher surface StreamEvents needs.
@@ -82,10 +85,9 @@ type StreamHub interface {
 type Server struct {
 	indexerv1.UnimplementedIndexerServiceServer
 
-	cfg           *config.GRPCConfig
-	reader        EventReader
-	hub           StreamHub
-	confirmations uint32
+	cfg    *config.GRPCConfig
+	reader EventReader
+	hub    StreamHub
 
 	grpc     *grpc.Server
 	listener net.Listener
@@ -94,12 +96,11 @@ type Server struct {
 
 // New wires the gRPC server with the supplied dependencies. `cfg.Port`
 // is honored at Start time; New does not bind the socket.
-func New(cfg *config.GRPCConfig, reader EventReader, hub StreamHub, confirmations uint32) *Server {
+func New(cfg *config.GRPCConfig, reader EventReader, hub StreamHub) *Server {
 	return &Server{
-		cfg:           cfg,
-		reader:        reader,
-		hub:           hub,
-		confirmations: confirmations,
+		cfg:    cfg,
+		reader: reader,
+		hub:    hub,
 	}
 }
 
@@ -119,6 +120,10 @@ func (s *Server) Start(_ context.Context) error {
 	opts := []grpc.ServerOption{
 		grpc.MaxRecvMsgSize(s.cfg.MaxRecvMsgSize),
 		grpc.MaxSendMsgSize(s.cfg.MaxSendMsgSize),
+		// Bound concurrent streams per connection — cheap protection on
+		// an unauthenticated internal port (pairs with the stream-hub
+		// subscriber cap).
+		grpc.MaxConcurrentStreams(maxConcurrentStreams),
 		grpc.KeepaliveParams(keepalive.ServerParameters{
 			Time:    30 * time.Second,
 			Timeout: 10 * time.Second,
@@ -181,7 +186,7 @@ func (s *Server) ListEvents(ctx context.Context, req *indexerv1.ListEventsReques
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
-	events, err := s.reader.ListEvents(ctx, filter, s.confirmations)
+	events, err := s.reader.ListEvents(ctx, filter)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "list events: %v", err)
 	}
@@ -210,12 +215,12 @@ func (s *Server) GetRequest(ctx context.Context, req *indexerv1.GetRequestReques
 		return nil, status.Error(codes.InvalidArgument, "req_id must be a base-10 uint256")
 	}
 
-	events, err := s.reader.EventsForRequest(ctx, reqID, s.confirmations)
+	events, err := s.reader.EventsForRequest(ctx, reqID)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "events for request: %v", err)
 	}
 	if len(events) == 0 {
-		return nil, status.Errorf(codes.NotFound, "req_id %s not observed past %d confirmations", req.ReqId, s.confirmations)
+		return nil, status.Errorf(codes.NotFound, "req_id %s not observed", req.ReqId)
 	}
 
 	out := &indexerv1.RequestStatus{ReqId: req.ReqId, Status: indexerv1.RequestStatus_STATUS_PENDING}
@@ -275,11 +280,11 @@ func (s *Server) StreamEvents(req *indexerv1.StreamEventsRequest, stream indexer
 	logger.Log().Infof("grpcsrv: StreamEvents subscribe id=%d peer=%s kinds=%v asset_id=%s from_block=%d",
 		sub.ID(), peerAddr, hubFilter.Kinds, formatAssetFilter(hubFilter.AssetID), req.GetFromBlock())
 
-	highestReplayed := uint64(0)
+	var watermark logKey // highest (block, log_index) emitted during replay
 
 	if req.GetFromBlock() > 0 {
 		var err error
-		highestReplayed, err = s.replayHistory(ctx, filter, req.GetFromBlock(), stream)
+		watermark, err = s.replayHistory(ctx, filter, req.GetFromBlock(), stream)
 		if err != nil {
 			return err
 		}
@@ -293,8 +298,12 @@ func (s *Server) StreamEvents(req *indexerv1.StreamEventsRequest, stream indexer
 			if !ok {
 				return status.Error(codes.Unavailable, "stream hub closed")
 			}
-			// Skip events the replay already emitted.
-			if e.BlockNumber < highestReplayed {
+			// Skip events the replay already emitted. Dedup is
+			// log-granular (block, log_index) — block-granular would
+			// drop live events sharing the boundary block, or re-emit
+			// replayed ones. The replay/live overlap is exactly the
+			// boundary block, so this is where precision matters.
+			if !(logKey{block: e.BlockNumber, logIndex: e.LogIndex}).after(watermark) {
 				continue
 			}
 			p, perr := e.ToProto()
@@ -309,15 +318,30 @@ func (s *Server) StreamEvents(req *indexerv1.StreamEventsRequest, stream indexer
 	}
 }
 
+// logKey orders events by (block_number, log_index) — the on-chain
+// total order of logs.
+type logKey struct {
+	block    uint64
+	logIndex uint32
+}
+
+// after reports whether k is strictly later than o in chain order.
+func (k logKey) after(o logKey) bool {
+	if k.block != o.block {
+		return k.block > o.block
+	}
+	return k.logIndex > o.logIndex
+}
+
 // replayHistory drains historical events from `fromBlock` to head in
-// chronological order. Returns the highest block_number emitted so
-// the live loop can suppress duplicates.
+// chronological order. Returns the highest (block, log_index) emitted
+// so the live loop can suppress duplicates at log granularity.
 func (s *Server) replayHistory(
 	ctx context.Context,
 	base repository.ListEventsFilter,
 	fromBlock uint64,
 	stream indexerv1.IndexerService_StreamEventsServer,
-) (uint64, error) {
+) (logKey, error) {
 	// Page through historical events ascending by block. We reuse
 	// ListEvents but flip the order in-memory because the repo's
 	// SELECT is DESC; for the v1 demo workload (small DB) flipping
@@ -327,9 +351,9 @@ func (s *Server) replayHistory(
 	filter.Limit = 1000
 	filter.Offset = 0
 
-	var highest uint64
+	var highest logKey
 	for {
-		batch, err := s.reader.ListEvents(ctx, filter, s.confirmations)
+		batch, err := s.reader.ListEvents(ctx, filter)
 		if err != nil {
 			return highest, status.Errorf(codes.Internal, "replay query: %v", err)
 		}
@@ -348,8 +372,8 @@ func (s *Server) replayHistory(
 			if err := stream.Send(p); err != nil {
 				return highest, err
 			}
-			if e.BlockNumber > highest {
-				highest = e.BlockNumber
+			if k := (logKey{block: e.BlockNumber, logIndex: e.LogIndex}); k.after(highest) {
+				highest = k
 			}
 		}
 		if len(batch) < filter.Limit {

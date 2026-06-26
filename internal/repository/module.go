@@ -29,10 +29,15 @@ func (m *Module) Init(ctx context.Context) error {
 	if m.cfg == nil {
 		return fmt.Errorf("repository module: database config is required")
 	}
+	// Parse a DSN that does NOT contain the password, then set the
+	// password as a struct field. A ParseConfig failure echoes the
+	// DSN it was given into the error; keeping the secret out of that
+	// string means it can never leak into logs (org rule 1).
 	cfg, err := pgxpool.ParseConfig(buildDSN(m.cfg))
 	if err != nil {
 		return fmt.Errorf("parse db config: %w", err)
 	}
+	cfg.ConnConfig.Password = m.cfg.Password
 	if m.cfg.MaxOpenConns > 0 {
 		cfg.MaxConns = int32(m.cfg.MaxOpenConns) //nolint:gosec // small bounded value.
 	}
@@ -78,9 +83,12 @@ func (m *Module) HealthCheck(ctx context.Context) error {
 // Repository exposes the typed repository for downstream modules.
 func (m *Module) Repository() *Repository { return m.repo }
 
+// buildDSN omits the password on purpose — it is set on
+// cfg.ConnConfig.Password after parsing so it can never appear in a
+// ParseConfig error string (org rule 1: no creds in output).
 func buildDSN(cfg *config.DatabaseConfig) string {
 	return fmt.Sprintf(
-		"postgres://%s:%s@%s:%d/%s?sslmode=%s",
-		cfg.User, cfg.Password, cfg.Host, cfg.Port, cfg.Name, cfg.SSLMode,
+		"postgres://%s@%s:%d/%s?sslmode=%s",
+		cfg.User, cfg.Host, cfg.Port, cfg.Name, cfg.SSLMode,
 	)
 }

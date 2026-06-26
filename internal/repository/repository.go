@@ -61,12 +61,12 @@ INSERT INTO events (
     kind, contract_address, tx_hash, block_hash, block_number, log_index,
     asset_id, req_id,
     price_requested_payload, price_fulfilled_payload, asset_registered_payload,
-    observed_at, confirmations, orphaned
+    observed_at
 ) VALUES (
     $1, $2, $3, $4, $5, $6,
     $7, $8,
     $9, $10, $11,
-    $12, $13, $14
+    $12
 )
 ON CONFLICT (tx_hash, log_index) DO NOTHING
 RETURNING id`
@@ -84,8 +84,6 @@ RETURNING id`
 		payloads.priceFulfilled,
 		payloads.assetRegistered,
 		e.ObservedAt,
-		int32(e.Confirmations), //nolint:gosec // confirmation depths fit in int32.
-		e.Orphaned,
 	)
 	var id int64
 	if err := row.Scan(&id); err != nil {
@@ -112,16 +110,14 @@ type ListEventsFilter struct {
 	Offset    int
 }
 
-// ListEvents returns confirmed, non-orphaned events matching filter.
-// Orphaned events are NEVER returned (v1 has no `include_orphaned`
-// switch). Sorted descending by (block_number, log_index).
-func (r *Repository) ListEvents(ctx context.Context, f ListEventsFilter, confirmations uint32) ([]*models.Event, error) {
+// ListEvents returns events matching the filter, sorted descending by
+// (block_number, log_index). There is no confirmation gate — events
+// are visible the moment they are persisted (emit-on-ingest).
+func (r *Repository) ListEvents(ctx context.Context, f ListEventsFilter) ([]*models.Event, error) {
 	var (
 		args  []any
-		where []string
+		where = []string{"TRUE"}
 	)
-	args = append(args, int32(confirmations)) //nolint:gosec // small.
-	where = append(where, "orphaned = FALSE", fmt.Sprintf("confirmations >= $%d", len(args)))
 
 	if len(f.Kinds) > 0 {
 		kinds := make([]string, 0, len(f.Kinds))
@@ -162,7 +158,7 @@ func (r *Repository) ListEvents(ctx context.Context, f ListEventsFilter, confirm
 SELECT id, kind, contract_address, tx_hash, block_hash, block_number, log_index,
        asset_id, req_id,
        price_requested_payload, price_fulfilled_payload, asset_registered_payload,
-       observed_at, confirmations, orphaned
+       observed_at
 FROM events
 WHERE %s
 ORDER BY block_number DESC, log_index DESC
@@ -180,10 +176,9 @@ LIMIT $%d OFFSET $%d`,
 	return scanEvents(rows)
 }
 
-// EventsForRequest returns every event with the supplied req_id, of
-// the kinds we care about for RequestStatus. Excludes orphaned + sub-
-// threshold rows.
-func (r *Repository) EventsForRequest(ctx context.Context, reqID *big.Int, confirmations uint32) ([]*models.Event, error) {
+// EventsForRequest returns every event with the supplied req_id,
+// ordered ascending by (block_number, log_index). No confirmation gate.
+func (r *Repository) EventsForRequest(ctx context.Context, reqID *big.Int) ([]*models.Event, error) {
 	if reqID == nil {
 		return nil, fmt.Errorf("req_id is required")
 	}
@@ -191,71 +186,17 @@ func (r *Repository) EventsForRequest(ctx context.Context, reqID *big.Int, confi
 SELECT id, kind, contract_address, tx_hash, block_hash, block_number, log_index,
        asset_id, req_id,
        price_requested_payload, price_fulfilled_payload, asset_registered_payload,
-       observed_at, confirmations, orphaned
+       observed_at
 FROM events
 WHERE req_id = $1
-  AND orphaned = FALSE
-  AND confirmations >= $2
 ORDER BY block_number ASC, log_index ASC`
 
-	rows, err := r.pool.Query(ctx, q, reqID.String(), int32(confirmations)) //nolint:gosec // confirmations + blocks are 0..N, well under int32/int64 max.
+	rows, err := r.pool.Query(ctx, q, reqID.String())
 	if err != nil {
 		return nil, fmt.Errorf("events for request query: %w", err)
 	}
 	defer rows.Close()
 	return scanEvents(rows)
-}
-
-// PendingEvents returns events not yet final (confirmations < N AND
-// not orphaned). Bounded by `limit` so a confirmer tick can't blow up
-// on a giant backlog.
-func (r *Repository) PendingEvents(ctx context.Context, confirmations uint32, limit int) ([]*models.Event, error) {
-	if limit <= 0 || limit > 10_000 {
-		limit = 1000
-	}
-	const q = `
-SELECT id, kind, contract_address, tx_hash, block_hash, block_number, log_index,
-       asset_id, req_id,
-       price_requested_payload, price_fulfilled_payload, asset_registered_payload,
-       observed_at, confirmations, orphaned
-FROM events
-WHERE orphaned = FALSE
-  AND confirmations < $1
-ORDER BY block_number ASC, log_index ASC
-LIMIT $2`
-
-	rows, err := r.pool.Query(ctx, q, int32(confirmations), limit) //nolint:gosec // confirmations + blocks are 0..N, well under int32/int64 max.
-	if err != nil {
-		return nil, fmt.Errorf("pending events query: %w", err)
-	}
-	defer rows.Close()
-	return scanEvents(rows)
-}
-
-// UpdateConfirmations writes the new confirmation depth for an event.
-// Returns ErrNotFound if id is unknown.
-func (r *Repository) UpdateConfirmations(ctx context.Context, id int64, confirmations uint32) error {
-	tag, err := r.pool.Exec(ctx, `UPDATE events SET confirmations = $1 WHERE id = $2`, int32(confirmations), id) //nolint:gosec // confirmations + blocks are 0..N, well under int32/int64 max.
-	if err != nil {
-		return fmt.Errorf("update confirmations: %w", err)
-	}
-	if tag.RowsAffected() == 0 {
-		return ErrNotFound
-	}
-	return nil
-}
-
-// MarkOrphaned sets the orphaned flag — confirmer's verdict for an
-// event whose original block is no longer canonical.
-func (r *Repository) MarkOrphaned(ctx context.Context, id int64) error {
-	tag, err := r.pool.Exec(ctx, `UPDATE events SET orphaned = TRUE WHERE id = $1`, id)
-	if err != nil {
-		return fmt.Errorf("mark orphaned: %w", err)
-	}
-	if tag.RowsAffected() == 0 {
-		return ErrNotFound
-	}
-	return nil
 }
 
 // ---------------------------------------------------------------------
@@ -457,20 +398,18 @@ func scanEvents(rows pgx.Rows) ([]*models.Event, error) {
 
 func scanEvent(rows pgx.Rows) (*models.Event, error) {
 	var (
-		id, blockNumber                     int64
-		kindStr, contractAddr, txHash, bh   string
-		logIndex                            int32
-		assetIDStr, reqIDStr                *string
-		prJSON, pfJSON, arJSON              []byte
-		observedAt                          time.Time
-		confirmations                       int32
-		orphaned                            bool
+		id, blockNumber                   int64
+		kindStr, contractAddr, txHash, bh string
+		logIndex                          int32
+		assetIDStr, reqIDStr              *string
+		prJSON, pfJSON, arJSON            []byte
+		observedAt                        time.Time
 	)
 	if err := rows.Scan(
 		&id, &kindStr, &contractAddr, &txHash, &bh, &blockNumber, &logIndex,
 		&assetIDStr, &reqIDStr,
 		&prJSON, &pfJSON, &arJSON,
-		&observedAt, &confirmations, &orphaned,
+		&observedAt,
 	); err != nil {
 		return nil, fmt.Errorf("scan event row: %w", err)
 	}
@@ -489,8 +428,6 @@ func scanEvent(rows pgx.Rows) (*models.Event, error) {
 		BlockNumber:     uint64(blockNumber), //nolint:gosec // already validated >= 0 by DB type.
 		LogIndex:        uint32(logIndex),    //nolint:gosec // bounded.
 		ObservedAt:      observedAt,
-		Confirmations:   uint32(confirmations), //nolint:gosec // bounded.
-		Orphaned:        orphaned,
 	}
 
 	if assetIDStr != nil && *assetIDStr != "" {

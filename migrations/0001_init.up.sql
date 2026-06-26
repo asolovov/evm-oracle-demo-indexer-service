@@ -25,8 +25,6 @@ CREATE TABLE IF NOT EXISTS events (
     asset_registered_payload    JSONB,
 
     observed_at                 TIMESTAMPTZ NOT NULL DEFAULT now(),
-    confirmations               INTEGER     NOT NULL DEFAULT 0,
-    orphaned                    BOOLEAN     NOT NULL DEFAULT FALSE,
 
     CONSTRAINT events_kind_check
         CHECK (kind IN ('PRICE_REQUESTED', 'PRICE_FULFILLED', 'ASSET_REGISTERED')),
@@ -48,14 +46,6 @@ CREATE INDEX IF NOT EXISTS events_asset_kind_block_desc
 CREATE INDEX IF NOT EXISTS events_req_id
     ON events (req_id)
     WHERE req_id IS NOT NULL;
-
--- Confirmer scan: walks through not-yet-final, not-yet-orphaned events.
--- The threshold (N=5 default) is NOT baked into the index — the query
--- adds `confirmations < N` itself, so changes to Confirmations don't
--- invalidate the index.
-CREATE INDEX IF NOT EXISTS events_pending
-    ON events (block_number)
-    WHERE orphaned = FALSE;
 
 
 -- Single-row table holding the last block successfully drained from

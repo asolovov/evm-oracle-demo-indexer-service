@@ -80,21 +80,17 @@ type ChainConfig struct {
 	BackfillFromBlock uint64 `mapstructure:"backfill_from_block"`
 }
 
-// IndexerConfig holds confirmer + stream-hub knobs.
+// IndexerConfig holds chainsub catch-up + stream-hub knobs. There is
+// no confirmation gate — events emit on ingest — so the old
+// Confirmations / ReorgCheckIntervalSec knobs are gone.
 type IndexerConfig struct {
-	// Confirmations required before an event is considered final and
-	// allowed to flow through the StreamEvents hub.
-	Confirmations uint32 `mapstructure:"confirmations"`
-
-	// Interval at which the confirmer scans unconfirmed events.
-	ReorgCheckIntervalSec uint32 `mapstructure:"reorg_check_interval_sec"`
-
-	// Block-chunk size for `eth_getLogs` backfill calls.
+	// Block-chunk size for `eth_getLogs` catch-up calls. Bounded in
+	// Validate so a misconfigured value can't ask a public RPC for an
+	// enormous range in one call.
 	BackfillChunkSize uint64 `mapstructure:"backfill_chunk_size"`
 
 	// Per-subscriber outbound queue depth on the stream hub. When a
-	// subscriber lags past this, it gets dropped (rule from spec §3.2:
-	// "backpressure: drop slow clients").
+	// subscriber lags past this, it gets dropped (backpressure).
 	StreamSubscriberBuffer int `mapstructure:"stream_subscriber_buffer"`
 }
 
