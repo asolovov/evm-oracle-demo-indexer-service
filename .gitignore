@@ -34,3 +34,6 @@ internal/genproto/
 .env
 
 local
+
+# Local-run env file (INDEXER_ASSETS etc.) — never commit
+.env.local

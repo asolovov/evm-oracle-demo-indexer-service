@@ -47,27 +47,7 @@ CREATE INDEX IF NOT EXISTS events_req_id
     ON events (req_id)
     WHERE req_id IS NOT NULL;
 
-
--- Single-row table holding the last block successfully drained from
--- the chain. PK is forced to 1 by an INSERT in this migration so
--- upserts always target the same row.
-CREATE TABLE IF NOT EXISTS chain_cursor (
-    id                      INTEGER PRIMARY KEY,
-    last_processed_block    BIGINT      NOT NULL DEFAULT 0,
-    updated_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
-    CONSTRAINT chain_cursor_singleton CHECK (id = 1)
-);
-
-INSERT INTO chain_cursor (id, last_processed_block) VALUES (1, 0)
-    ON CONFLICT (id) DO NOTHING;
-
-
--- Aggregator address -> assetId mapping populated from
--- OracleRegistry.AssetRegistered events + the startup listAssets()
--- enumeration. Used by chainsub to attach asset_id to PriceRequested
--- / PriceFulfilled events that don't carry it natively.
-CREATE TABLE IF NOT EXISTS aggregator_registry (
-    aggregator      TEXT PRIMARY KEY,           -- 20-byte lowercase 0x hex
-    asset_id        TEXT NOT NULL,              -- bytes32 lowercase 0x hex
-    registered_at   TIMESTAMPTZ NOT NULL DEFAULT now()
-);
+-- NOTE: this is the ONLY table. The indexer is live-only (no historical
+-- catch-up → no chain_cursor) and the aggregator->asset mapping comes
+-- from config (no aggregator_registry table). The AssetRegistered events
+-- the API needs are bootstrapped into `events` on startup from config.

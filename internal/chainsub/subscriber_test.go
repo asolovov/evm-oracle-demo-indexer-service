@@ -2,13 +2,10 @@ package chainsub
 
 import (
 	"context"
-	"errors"
 	"math/big"
 	"sync"
 	"testing"
-	"time"
 
-	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 
@@ -18,11 +15,8 @@ import (
 // ---- doubles ----------------------------------------------------------
 
 type fakeStore struct {
-	mu            sync.Mutex
-	inserts       []*models.Event
-	cursor        uint64
-	cursorWrites  []uint64
-	aggregatorMap map[common.Address]common.Hash
+	mu      sync.Mutex
+	inserts []*models.Event
 }
 
 func (s *fakeStore) InsertEvent(_ context.Context, e *models.Event) (bool, error) {
@@ -35,28 +29,6 @@ func (s *fakeStore) InsertEvent(_ context.Context, e *models.Event) (bool, error
 	}
 	s.inserts = append(s.inserts, e)
 	return true, nil
-}
-
-func (s *fakeStore) UpsertAggregator(_ context.Context, _ common.Address, _ common.Hash) error {
-	return nil
-}
-
-func (s *fakeStore) AggregatorRegistry(_ context.Context) (map[common.Address]common.Hash, error) {
-	return s.aggregatorMap, nil
-}
-
-func (s *fakeStore) ChainCursor(_ context.Context) (*models.ChainCursor, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return &models.ChainCursor{LastProcessedBlock: s.cursor, UpdatedAt: time.Now()}, nil
-}
-
-func (s *fakeStore) UpdateChainCursor(_ context.Context, block uint64) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.cursor = block
-	s.cursorWrites = append(s.cursorWrites, block)
-	return nil
 }
 
 type fakePublisher struct {
@@ -77,51 +49,22 @@ func (p *fakePublisher) count() int {
 	return len(p.received)
 }
 
-type fakeFetcher struct {
-	mu            sync.Mutex
-	logs          []types.Log
-	queries       []ethereum.FilterQuery
-	failOnAddress *common.Address
-}
+var (
+	testRegistry   = common.HexToAddress("0x89a6c12a403733c6a817472cec46a530581cb7ef")
+	testAggregator = common.HexToAddress("0x075be31662c2548c4e940d7e769c328a34dcb281")
+	testAsset      = common.HexToHash("0x0f8a193ff464434486c0daf7db2a895884365d2bc84ba47a68fcf89c1b14b5b8")
+)
 
-func (f *fakeFetcher) FilterLogs(_ context.Context, q ethereum.FilterQuery) ([]types.Log, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.queries = append(f.queries, q)
-	if f.failOnAddress != nil && len(q.Addresses) == 1 && q.Addresses[0] == *f.failOnAddress {
-		return nil, errors.New("simulated provider rejection")
-	}
-	from, to := q.FromBlock.Uint64(), q.ToBlock.Uint64()
-	addrs := make(map[common.Address]struct{}, len(q.Addresses))
-	for _, a := range q.Addresses {
-		addrs[a] = struct{}{}
-	}
-	out := make([]types.Log, 0)
-	for _, l := range f.logs {
-		if l.BlockNumber < from || l.BlockNumber > to {
-			continue
-		}
-		if _, ok := addrs[l.Address]; !ok {
-			continue
-		}
-		out = append(out, l)
-	}
-	return out, nil
-}
-
-func newSub(store EventStore, pub Publisher, agg common.Address, asset common.Hash) *Subscriber {
-	s := New(store, pub, Config{
-		RegistryAddress: common.HexToAddress("0x89a6c12a403733c6a817472cec46a530581cb7ef"),
-		ChunkSize:       25,
-		CursorEvery:     50,
+func newSub(store EventStore, pub Publisher) *Subscriber {
+	return New(store, pub, Config{
+		WSURL:           "ws://unused-in-unit-tests",
+		RegistryAddress: testRegistry,
+		Assets:          []AssetMapping{{Aggregator: testAggregator, AssetID: testAsset}},
 	})
-	s.recordAggregator(agg, asset)
-	return s
 }
 
-// reqLogAt builds a PriceRequested log with a DISTINCT (tx_hash,
-// log_index) per tag so idempotent inserts don't collapse them (the
-// shared parser_test helper hardcodes one tx_hash).
+// reqLogAt builds a PriceRequested log with a distinct (tx_hash,
+// log_index) per tag.
 func reqLogAt(agg common.Address, reqID *big.Int, requester common.Address, block uint64, tag byte) types.Log {
 	reqIDBytes := common.LeftPadBytes(reqID.Bytes(), 32)
 	requesterBytes := common.LeftPadBytes(requester.Bytes(), 32)
@@ -135,20 +78,9 @@ func reqLogAt(agg common.Address, reqID *big.Int, requester common.Address, bloc
 	}
 }
 
-func mustParser(t *testing.T, s *Subscriber) *Parser {
-	t.Helper()
-	p, err := NewParser(s.registryAddr, s)
-	if err != nil {
-		t.Fatalf("NewParser: %v", err)
-	}
-	return p
-}
-
-// ---- backoff ----------------------------------------------------------
+// ---- tests -----------------------------------------------------------
 
 func TestBackoffFor_BoundedAndJittered(t *testing.T) {
-	// Every value must be within [0, cap] where cap grows exponentially
-	// but never exceeds maxBackoff.
 	for attempt := 0; attempt < 20; attempt++ {
 		capDelay := minBackoff << min(attempt, 16)
 		if capDelay <= 0 || capDelay > maxBackoff {
@@ -161,106 +93,48 @@ func TestBackoffFor_BoundedAndJittered(t *testing.T) {
 			}
 		}
 	}
-	// High attempts are capped at maxBackoff.
-	if got := minBackoff << min(99, 16); got < maxBackoff {
-		// sanity: the shift saturates well above the cap
-		t.Logf("shifted floor %s", got)
+}
+
+func TestNew_SeedsMappingFromConfig(t *testing.T) {
+	s := newSub(&fakeStore{}, &fakePublisher{})
+	got, ok := s.AssetIDFor(testAggregator)
+	if !ok || got != testAsset {
+		t.Errorf("AssetIDFor(seeded aggregator) = %s,%v; want %s,true", got.Hex(), ok, testAsset.Hex())
+	}
+	if _, ok := s.AssetIDFor(common.HexToAddress("0xdead")); ok {
+		t.Error("AssetIDFor(unknown) should be false")
 	}
 }
 
-// ---- catch-up ---------------------------------------------------------
-
-func TestCatchUp_PublishesAndAdvancesCursor(t *testing.T) {
-	agg := common.HexToAddress("0x075be31662c2548c4e940d7e769c328a34dcb281")
-	asset := common.HexToHash("0xaa")
-	requester := common.HexToAddress("0xCEF4Fe1CA9071f4ED4BAd6c1087CEb08838a983E")
-
-	blocks := []uint64{5, 17, 28, 51, 79}
-	logs := make([]types.Log, 0, len(blocks))
-	for i, blk := range blocks {
-		logs = append(logs, reqLogAt(agg, big.NewInt(int64(i+1)), requester, blk, byte(i+1)))
+func TestSubscribedAddresses_RegistryPlusAggregators(t *testing.T) {
+	s := newSub(&fakeStore{}, &fakePublisher{})
+	addrs := s.subscribedAddresses()
+	if len(addrs) != 2 {
+		t.Fatalf("want 2 addresses (registry + 1 aggregator), got %d", len(addrs))
 	}
-	fetcher := &fakeFetcher{logs: logs}
-	store := &fakeStore{cursor: 0, aggregatorMap: map[common.Address]common.Hash{agg: asset}}
-	pub := &fakePublisher{}
-	s := newSub(store, pub, agg, asset)
-
-	if err := s.catchUp(context.Background(), fetcher, mustParser(t, s), s.subscribedAddresses(), 80); err != nil {
-		t.Fatalf("catchUp: %v", err)
-	}
-
-	// Every event persisted AND published (emit-on-ingest, no gate).
-	if len(store.inserts) != len(logs) {
-		t.Errorf("inserted %d, want %d", len(store.inserts), len(logs))
-	}
-	if pub.count() != len(logs) {
-		t.Errorf("published %d, want %d (catch-up must publish, not just persist)", pub.count(), len(logs))
-	}
-	// Cursor advanced to head.
-	if store.cursor != 80 {
-		t.Errorf("final cursor = %d, want 80", store.cursor)
-	}
-	// Per-address chunking: every query targets exactly one address.
-	for i, q := range fetcher.queries {
-		if len(q.Addresses) != 1 {
-			t.Errorf("query[%d] targets %d addresses, want 1", i, len(q.Addresses))
-		}
+	set := map[common.Address]bool{addrs[0]: true, addrs[1]: true}
+	if !set[testRegistry] || !set[testAggregator] {
+		t.Errorf("addresses missing registry or aggregator: %v", addrs)
 	}
 }
-
-func TestCatchUp_PartialFailureParksCursor(t *testing.T) {
-	agg := common.HexToAddress("0x075be31662c2548c4e940d7e769c328a34dcb281")
-	asset := common.HexToHash("0xaa")
-	registry := common.HexToAddress("0x89a6c12a403733c6a817472cec46a530581cb7ef")
-
-	// Registry filter rejected on every chunk → no chunk is fully clean.
-	fetcher := &fakeFetcher{failOnAddress: &registry}
-	store := &fakeStore{cursor: 0, aggregatorMap: map[common.Address]common.Hash{agg: asset}}
-	pub := &fakePublisher{}
-	s := newSub(store, pub, agg, asset)
-
-	if err := s.catchUp(context.Background(), fetcher, mustParser(t, s), s.subscribedAddresses(), 80); err != nil {
-		t.Fatalf("catchUp: %v", err)
-	}
-	if store.cursor != 0 {
-		t.Errorf("cursor advanced to %d despite every chunk failing; want 0", store.cursor)
-	}
-}
-
-func TestCatchUp_NothingToDo(t *testing.T) {
-	agg := common.HexToAddress("0x075be31662c2548c4e940d7e769c328a34dcb281")
-	asset := common.HexToHash("0xaa")
-	fetcher := &fakeFetcher{}
-	store := &fakeStore{cursor: 100, aggregatorMap: map[common.Address]common.Hash{agg: asset}}
-	s := newSub(store, &fakePublisher{}, agg, asset)
-
-	if err := s.catchUp(context.Background(), fetcher, mustParser(t, s), s.subscribedAddresses(), 100); err != nil {
-		t.Fatalf("catchUp: %v", err)
-	}
-	if len(fetcher.queries) != 0 {
-		t.Errorf("expected no getLogs calls when cursor==head, got %d", len(fetcher.queries))
-	}
-}
-
-// ---- ingest publish-on-insert + idempotency ---------------------------
 
 func TestIngest_PublishesOncePerNewEvent(t *testing.T) {
-	agg := common.HexToAddress("0x075be31662c2548c4e940d7e769c328a34dcb281")
-	asset := common.HexToHash("0xaa")
-	requester := common.HexToAddress("0xCEF4Fe1CA9071f4ED4BAd6c1087CEb08838a983E")
-
-	store := &fakeStore{aggregatorMap: map[common.Address]common.Hash{agg: asset}}
+	store := &fakeStore{}
 	pub := &fakePublisher{}
-	s := newSub(store, pub, agg, asset)
-	parser := mustParser(t, s)
-	lg := buildPriceRequestedLog(agg, big.NewInt(7), requester, 42)
+	s := newSub(store, pub)
+	parser, err := NewParser(s.registryAddr, s)
+	if err != nil {
+		t.Fatalf("NewParser: %v", err)
+	}
+	requester := common.HexToAddress("0xCEF4Fe1CA9071f4ED4BAd6c1087CEb08838a983E")
+	lg := reqLogAt(testAggregator, big.NewInt(7), requester, 42, 1)
 
 	// First ingest: persisted + published.
-	if err := s.ingest(context.Background(), nil, parser, lg, false); err != nil {
+	if err := s.ingest(context.Background(), parser, lg); err != nil {
 		t.Fatalf("ingest 1: %v", err)
 	}
-	// Replay of the same log: idempotent, NOT re-published.
-	if err := s.ingest(context.Background(), nil, parser, lg, false); err != nil {
+	// Replay: idempotent, not re-published.
+	if err := s.ingest(context.Background(), parser, lg); err != nil {
 		t.Fatalf("ingest 2: %v", err)
 	}
 	if pub.count() != 1 {
@@ -268,5 +142,35 @@ func TestIngest_PublishesOncePerNewEvent(t *testing.T) {
 	}
 	if len(store.inserts) != 1 {
 		t.Errorf("stored %d, want 1", len(store.inserts))
+	}
+	if store.inserts[0].AssetID != testAsset {
+		t.Errorf("asset_id not resolved from config mapping: %s", store.inserts[0].AssetID.Hex())
+	}
+}
+
+func TestIngest_AssetRegisteredExtendsMapping(t *testing.T) {
+	store := &fakeStore{}
+	s := newSub(store, &fakePublisher{})
+	parser, _ := NewParser(s.registryAddr, s)
+
+	newAgg := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	newAsset := common.HexToHash("0x2222222222222222222222222222222222222222222222222222222222222222")
+	// AssetRegistered(assetId indexed, aggregator indexed) from the registry.
+	lg := types.Log{
+		Address: testRegistry,
+		Topics: []common.Hash{
+			assetRegisteredTopic,
+			newAsset,
+			common.BytesToHash(common.LeftPadBytes(newAgg.Bytes(), 32)),
+		},
+		BlockNumber: 100,
+		TxHash:      common.HexToHash("0xfeed"),
+		Index:       0,
+	}
+	if err := s.ingest(context.Background(), parser, lg); err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+	if got, ok := s.AssetIDFor(newAgg); !ok || got != newAsset {
+		t.Errorf("live AssetRegistered did not extend the mapping: %s,%v", got.Hex(), ok)
 	}
 }

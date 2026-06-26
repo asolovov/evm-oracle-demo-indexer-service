@@ -1,7 +1,5 @@
 // Package repository provides the pgx-backed persistence layer for
-// indexer-service. Wires only the `events`, `chain_cursor`, and
-// `aggregator_registry` tables — no ORM, raw SQL with pgx.Batch when
-// it matters.
+// indexer-service. The only table is `events` — no ORM, raw SQL.
 package repository
 
 import (
@@ -197,85 +195,6 @@ ORDER BY block_number ASC, log_index ASC`
 	}
 	defer rows.Close()
 	return scanEvents(rows)
-}
-
-// ---------------------------------------------------------------------
-// chain_cursor
-// ---------------------------------------------------------------------
-
-// ChainCursor returns the (single-row) cursor. Creates the row if it
-// doesn't exist — defensive in case the migration's seed INSERT was
-// lost.
-func (r *Repository) ChainCursor(ctx context.Context) (*models.ChainCursor, error) {
-	const q = `SELECT last_processed_block, updated_at FROM chain_cursor WHERE id = 1`
-	var (
-		blk uint64
-		upd time.Time
-	)
-	if err := r.pool.QueryRow(ctx, q).Scan(&blk, &upd); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			// Seed the row defensively.
-			if _, ierr := r.pool.Exec(ctx, `INSERT INTO chain_cursor (id, last_processed_block) VALUES (1, 0) ON CONFLICT DO NOTHING`); ierr != nil {
-				return nil, fmt.Errorf("seed chain cursor: %w", ierr)
-			}
-			return &models.ChainCursor{LastProcessedBlock: 0, UpdatedAt: time.Now().UTC()}, nil
-		}
-		return nil, fmt.Errorf("read chain cursor: %w", err)
-	}
-	return &models.ChainCursor{LastProcessedBlock: blk, UpdatedAt: upd}, nil
-}
-
-// UpdateChainCursor advances the persisted block height. Idempotent
-// for replays — never moves backward.
-func (r *Repository) UpdateChainCursor(ctx context.Context, block uint64) error {
-	const q = `
-UPDATE chain_cursor
-SET last_processed_block = $1, updated_at = now()
-WHERE id = 1 AND last_processed_block <= $1`
-	if _, err := r.pool.Exec(ctx, q, int64(block)); err != nil { //nolint:gosec // bounded.
-		return fmt.Errorf("update chain cursor: %w", err)
-	}
-	return nil
-}
-
-// ---------------------------------------------------------------------
-// aggregator_registry
-// ---------------------------------------------------------------------
-
-// UpsertAggregator records the address -> asset_id mapping. Idempotent.
-func (r *Repository) UpsertAggregator(ctx context.Context, aggregator common.Address, assetID common.Hash) error {
-	const q = `
-INSERT INTO aggregator_registry (aggregator, asset_id)
-VALUES ($1, $2)
-ON CONFLICT (aggregator) DO UPDATE SET asset_id = EXCLUDED.asset_id`
-	if _, err := r.pool.Exec(ctx, q,
-		strings.ToLower(aggregator.Hex()),
-		strings.ToLower(assetID.Hex()),
-	); err != nil {
-		return fmt.Errorf("upsert aggregator: %w", err)
-	}
-	return nil
-}
-
-// AggregatorRegistry returns every persisted aggregator->asset mapping.
-// Used at chainsub startup to seed the in-memory lookup before
-// subscribing.
-func (r *Repository) AggregatorRegistry(ctx context.Context) (map[common.Address]common.Hash, error) {
-	rows, err := r.pool.Query(ctx, `SELECT aggregator, asset_id FROM aggregator_registry`)
-	if err != nil {
-		return nil, fmt.Errorf("read aggregator registry: %w", err)
-	}
-	defer rows.Close()
-
-	out := make(map[common.Address]common.Hash)
-	for rows.Next() {
-		var aggStr, assetStr string
-		if err := rows.Scan(&aggStr, &assetStr); err != nil {
-			return nil, fmt.Errorf("scan aggregator row: %w", err)
-		}
-		out[common.HexToAddress(aggStr)] = common.HexToHash(assetStr)
-	}
-	return out, rows.Err()
 }
 
 // ---------------------------------------------------------------------

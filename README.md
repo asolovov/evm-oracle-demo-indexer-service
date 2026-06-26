@@ -3,58 +3,58 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![Go Version](https://img.shields.io/badge/Go-1.25%2B-00ADD8?logo=go)](https://go.dev/)
 
-Single-chain event indexer for the [EVM Oracle Demo](https://github.com/asolovov). It is the **single chain-observer** for the system: it WS-subscribes to every registered `PriceAggregator` plus the `OracleRegistry`, persists every observed event into `evm_indexer`, and exposes a gRPC stream that the rest of the stack (oracle-service, rest-api) consumes.
+Single-chain event indexer for the [EVM Oracle Demo](https://github.com/asolovov). It is the **single chain-observer** for the system: it WS-subscribes to the deployed `PriceAggregator`s plus the `OracleRegistry`, persists every observed event into `evm_indexer`, and exposes a gRPC stream that the rest of the stack (oracle-service, api) consumes.
 
-**Emit-on-ingest — no confirmation gate.** An event is published to `StreamEvents` subscribers the moment it is persisted, for the lowest possible latency ("fire ASAP"). There is no confirmation threshold and no reorg/orphan tracking inside the indexer.
+**Live-only + emit-on-ingest.** The only chain operation is a WebSocket log subscription — **no historical `eth_getLogs`, no `eth_call`, no archive queries.** That's deliberate: free RPC tiers don't serve historical logs (they 403/429), and a demo only needs events as they happen. Each event is published to `StreamEvents` subscribers the moment it is persisted, for the lowest possible latency.
 
-> **Reorg trade-off (read this).** Because events fire at 0 confirmations, a chain reorg can roll back an event that was already streamed. Re-orged-out events are NOT retracted; a replacement log at a different `(tx_hash, log_index)` is ingested as an additional event. This is a deliberate demo choice. **Finality is a downstream contract:** any consumer that takes an irreversible action (e.g. oracle-service signing a submission) must apply its own finality guard before acting. The indexer's job is speed, not finality.
+The aggregator→asset mapping comes from **config** (the deployed asset set — see `INDEXER_ASSETS`), not from reading the registry on chain. On startup the indexer **bootstraps one `AssetRegistered` event per configured asset** into `evm_indexer` (idempotent) so the API can read the asset set without any historical backfill. Live `AssetRegistered` logs extend the set at runtime.
 
-The indexer has **no outbound gRPC clients**. It does not call price-service, oracle-service, or anything else. Consumers pull from `indexer.v1.IndexerService/StreamEvents`.
+> **Trade-offs (read this).**
+> - **No backfill.** Events emitted while the indexer is disconnected, or before it starts, are not recovered — only live events from subscription onward. (A live demo triggers events and watches them stream, so this is the right call.)
+> - **No reorg handling.** Events fire at 0 confirmations; a reorg can roll back an already-streamed event. **Finality is a downstream contract:** any consumer that acts irreversibly (oracle-service signing) applies its own finality guard. The indexer's job is speed.
 
-Public-RPC WebSockets drop constantly, so **reconnect is the steady state, not an error path**: on every (re)connect the subscriber subscribes live first, then catches up the gap since the persisted `chain_cursor` via `eth_getLogs`, so no event is lost across a disconnect. Reconnect uses exponential backoff with jitter. The chain client is owned end-to-end by one goroutine (no shared state, no data race).
+The indexer has **no outbound gRPC clients**. Consumers pull from `indexer.v1.IndexerService/StreamEvents`.
+
+Public-RPC WebSockets drop often, so **reconnect is the steady state, not an error path**: the run loop reconnects with exponential backoff + jitter. The WS client is owned end-to-end by one goroutine (no shared state, no data race).
 
 ---
 
 ## Architecture
 
 ```
-                          chain (single, e.g. Ethereum Sepolia)
-                              │
-                  ┌───────────┼───────────────────────┐
-                  │           │                       │
-       OracleRegistry   PriceAggregator(s)     wss:// WS subscription
-                              │
-                              ▼
-            ┌─────────────────────────────────────┐
-            │     internal/chainsub  (1 goroutine) │  ← owns the chain
-            │   per (re)connect, with backoff:     │    client end-to-end
-            │   1. SubscribeFilterLogs (live)      │    (no shared state,
-            │   2. catch-up [cursor+1..head] via   │    no data race).
-            │      eth_getLogs (per-address chunk) │    Decodes via abigen,
-            │   3. drain live; advance chain_cursor│    resolves asset_id
-            │   ingest = parse → persist → PUBLISH  │    from the registry.
-            └───────┬───────────────────┬──────────┘
-                    │ InsertEvent        │ Publish (on insert, 0-conf)
-                    ▼                    ▼
-            ┌──────────────┐    ┌──────────────────┐
-            │  evm_indexer │    │ internal/streamhub │ bounded per-sub
-            │  Postgres    │    │  live pub/sub      │ buffer; slow + over-
-            │  pgx/v5      │    │  (subscriber cap)  │ cap subs dropped.
-            └──────┬───────┘    └──────┬─────────────┘
-                   │                   │
-                   ▼                   ▼
+   config assets ──► bootstrap: seed 1 AssetRegistered / asset (idempotent) ──► evm_indexer
+   (INDEXER_ASSETS)                                                                  ▲
+                          chain (single, e.g. Ethereum Sepolia)                      │
+                              │  wss:// log subscription ONLY                        │
+                              ▼                                                      │
+            ┌─────────────────────────────────────┐                                 │
+            │     internal/chainsub  (1 goroutine) │  live-only; owns the WS         │
+            │   reconnect loop (exp backoff+jitter)│  client end-to-end (no          │
+            │   SubscribeFilterLogs(registry +     │  shared state, no race).        │
+            │     configured aggregators)          │  Decodes via abigen;            │
+            │   ingest = parse → persist ──────────┼──► InsertEvent ─────────────────┘
+            │                  └────────► PUBLISH   │  (emit-on-ingest, 0-conf)
+            └──────────────────────────┬───────────┘
+                                       │ Publish
+                                       ▼
+                            ┌──────────────────┐
+                            │ internal/streamhub │ bounded per-sub buffer;
+                            │  live pub/sub      │ slow + over-cap subs dropped.
+                            └──────┬─────────────┘
+                                   │
+                                   ▼
        ┌─────────────────────────────────────────┐
        │ internal/grpcsrv — IndexerService:       │
        │   - ListEvents(filter)        (reads DB) │
        │   - GetRequest(req_id)        (reads DB) │
-       │   - StreamEvents(filter)  ← oracle & BFF │
+       │   - StreamEvents(filter)  ← oracle & API │
        │       replay (DB) then live (hub);       │
        │       log-granular (block,log_index)     │
        │       dedup at the boundary.             │
        └─────────────────────────────────────────┘
 
-       No confirmation gate, no confirmer, no reorg/orphan tracking.
-       Catch-up runs on EVERY connect, so a disconnect gap is refilled.
+       No eth_getLogs / eth_call, no confirmer, no cursor, no reorg
+       tracking. The only chain call is the WS log subscription.
 ```
 
 ---
@@ -69,9 +69,10 @@ make lint               # golangci-lint
 ```
 
 ```bash
-# With docker-compose (brings up Postgres + migrate + indexer)
-export CHAIN_WS_URL=wss://...
-export CHAIN_RPC_URL=https://...
+# With docker-compose (brings up Postgres + migrate + indexer).
+# CHAIN_WS_URL is the only required chain setting — e.g. an Alchemy
+# free-tier wss endpoint. No RPC URL: the indexer is live-only.
+export CHAIN_WS_URL=wss://eth-sepolia.g.alchemy.com/v2/<your-key>
 docker compose up --build
 ```
 
@@ -119,12 +120,10 @@ Every value is set via env (`viper.SetDefault` registers a default for every key
 | `HEALTHZ_PORT` | `8080` | |
 | `CHAIN_NAME` | `ethereum-sepolia` | |
 | `CHAIN_CHAIN_ID` | `11155111` | |
-| `CHAIN_WS_URL` | _empty (required)_ | |
-| `CHAIN_RPC_URL` | _empty (required)_ | |
-| `CHAIN_REGISTRY_ADDRESS` | _empty (required)_ | 0x-prefixed 20-byte hex |
-| `CHAIN_BACKFILL_FROM_BLOCK` | `0` | catch-up seed when `chain_cursor.last_processed_block = 0`. Set to a recent block to avoid a huge cold-start replay. |
-| `INDEXER_BACKFILL_CHUNK_SIZE` | `1000` | blocks per `eth_getLogs` call (validated to be in `[1, 10000]`) |
+| `CHAIN_WS_URL` | _empty (required)_ | WebSocket endpoint — the only chain connection (e.g. Alchemy free-tier wss) |
+| `CHAIN_REGISTRY_ADDRESS` | deployed registry | 0x-prefixed 20-byte hex; subscribed to for live `AssetRegistered` |
 | `INDEXER_STREAM_SUBSCRIBER_BUFFER` | `256` | per-subscriber outbound buffer (overflow → drop) |
+| `INDEXER_ASSETS` | _baked 10-asset default_ | optional JSON array `[{"symbol","asset_id","aggregator"}]` to override the deployed asset set |
 | `TELEMETRY_LOG_LEVEL` | `info` | |
 | `TELEMETRY_LOG_FORMAT` | `json` | |
 
@@ -137,10 +136,9 @@ config/                   config scheme + viper defaults + Validate()
 internal/
   application.go          SINGLE wiring point (architecture rules 1+2)
   models/                 domain types + proto<->model conversions (rule 3)
-  repository/             pgx repository for events / chain_cursor / aggregator_registry
-  chainsub/               WS subscriber + per-connect catch-up + log parser
-                          (abigen-driven); owns the chain client, publishes
-                          on ingest
+  repository/             pgx repository for the events table
+  chainsub/               live WS subscriber + abigen log parser; owns the
+                          WS client, publishes on ingest; mapping from config
   streamhub/              in-memory live pub/sub (per-sub buffer + cap)
   grpcsrv/                IndexerService server (replay-then-live stream)
   metrics/                Prometheus registry + adapters
@@ -169,17 +167,19 @@ migrations/               golang-migrate scripts for evm_indexer
 5. `pkg/contracts/` holds abigen-generated bindings (rule 5 exception) — abigen bindings ARE committed; protobuf stubs are not.
 6. All config is in `/config/`. `viper.SetDefault` for every nested key.
 7. Owns DB `evm_indexer` exclusively.
-8. Bootstrap is env-var-driven (no separate seed CLIs / Job containers).
+8. Bootstrap is env-var-driven (rule 8): the configured asset set seeds `AssetRegistered` events into the DB on startup via an idempotent upsert — no separate seed CLIs / Job containers.
 9. `internal/genproto/*.go` is gitignored and regenerated by `make proto-gen` at build time; `protocols/` holds proto sources only. Abigen bindings are the documented exception.
 
 ---
 
 ## Known gaps / v1 limitations
 
-- **Hot-add of aggregators.** When `AssetRegistered` arrives the persistent mapping + in-memory cache update immediately, but the new aggregator's own logs won't reach the active WS filter — picked up on the next reconnect. Acceptable for the demo where aggregators are seeded at deploy time.
-- **PriceFulfilled `round_id`.** The on-chain event doesn't carry `round_id`. chainsub backfills it best-effort via a bounded `latestRoundData()` call at the fulfilling block — **only on the live tail**, skipped during catch-up (the archival call would hammer the RPC). Failures leave the field empty and the proto emits an empty string.
-- **`/metrics` cardinality.** Per-kind labels are bounded (3 values); the registry doesn't expose per-asset or per-address counters yet.
-- **Single-chain.** The whole rig assumes one chain — multi-chain would require one chainsub per chain, which is out of scope.
+- **No backfill.** Live-only: events emitted while disconnected, or before startup, are not recovered. Deliberate — free RPC tiers don't serve historical logs, and a live demo doesn't need it.
+- **No reorg handling.** Emit at 0 confirmations; finality is the consumer's responsibility (see Trade-offs at the top).
+- **PriceFulfilled `round_id`** is always empty. The on-chain event doesn't carry it, and the indexer makes no `eth_call` to recover it (that would need archive access). The proto field is emitted as an empty string.
+- **Hot-add of aggregators.** A live `AssetRegistered` updates the in-memory mapping immediately, but the new aggregator's own price logs reach the WS filter only on the next reconnect. Fine for the demo (the asset set is fixed in config).
+- **Asset set is config-trusted.** The aggregator→asset mapping is the configured `INDEXER_ASSETS` (defaults to the deployed 10); the indexer does not verify it against the on-chain registry.
+- **Single-chain.** Multi-chain would require one chainsub per chain — out of scope.
 
 ---
 

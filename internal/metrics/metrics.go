@@ -21,7 +21,6 @@ type Registry struct {
 	r *prometheus.Registry
 
 	EventsSeen   *prometheus.CounterVec // indexer_events_seen_total{kind}
-	LagBlocks    prometheus.Gauge       // indexer_lag_blocks
 	StreamDrops  *prometheus.CounterVec // indexer_stream_drops_total{reason}
 	DecodeErrors prometheus.Counter     // indexer_decode_errors_total
 }
@@ -38,10 +37,6 @@ func New() *Registry {
 			},
 			[]string{"kind"},
 		),
-		LagBlocks: prometheus.NewGauge(prometheus.GaugeOpts{
-			Name: "indexer_lag_blocks",
-			Help: "Blocks between the chain head and the last block the indexer has caught up to.",
-		}),
 		StreamDrops: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
 				Name: "indexer_stream_drops_total",
@@ -54,7 +49,7 @@ func New() *Registry {
 			Help: "Logs the chainsub parser failed to decode.",
 		}),
 	}
-	reg.MustRegister(r.EventsSeen, r.LagBlocks, r.StreamDrops, r.DecodeErrors)
+	reg.MustRegister(r.EventsSeen, r.StreamDrops, r.DecodeErrors)
 	return r
 }
 
@@ -73,9 +68,6 @@ func (c Chainsub) ObserveSeen(k models.EventKind) {
 
 // ObserveDecodeError increments indexer_decode_errors_total.
 func (c Chainsub) ObserveDecodeError() { c.R.DecodeErrors.Inc() }
-
-// ObserveLagBlocks sets indexer_lag_blocks.
-func (c Chainsub) ObserveLagBlocks(v float64) { c.R.LagBlocks.Set(v) }
 
 // HubDrop returns a streamhub.DropFunc that bumps indexer_stream_drops_total.
 func (r *Registry) HubDrop() streamhub.DropFunc {

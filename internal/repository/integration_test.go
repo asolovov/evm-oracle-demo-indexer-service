@@ -130,52 +130,36 @@ func TestIntegration_InsertEventIdempotent(t *testing.T) {
 	}
 }
 
-func TestIntegration_ListEventsAndConfirmations(t *testing.T) {
+func TestIntegration_ListEventsVisibleImmediately(t *testing.T) {
 	repo, teardown := setupPostgres(t)
 	defer teardown()
 	ctx := context.Background()
 
-	// Insert a fresh event (confirmations=0).
+	// Emit-on-ingest: an event is visible the moment it's persisted —
+	// no confirmation gate.
 	evt := mkPriceRequested(2, 200)
 	if _, err := repo.InsertEvent(ctx, evt); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
 
-	// Below-threshold queries should return nothing.
-	got, err := repo.ListEvents(ctx, ListEventsFilter{}, 5)
+	got, err := repo.ListEvents(ctx, ListEventsFilter{})
 	if err != nil {
 		t.Fatalf("ListEvents: %v", err)
 	}
-	if len(got) != 0 {
-		t.Errorf("expected no confirmed events yet, got %d", len(got))
-	}
-
-	// Mark it confirmed.
-	if err := repo.UpdateConfirmations(ctx, evt.ID, 5); err != nil {
-		t.Fatalf("UpdateConfirmations: %v", err)
-	}
-
-	got, err = repo.ListEvents(ctx, ListEventsFilter{}, 5)
-	if err != nil {
-		t.Fatalf("ListEvents after confirm: %v", err)
-	}
 	if len(got) != 1 {
-		t.Fatalf("expected 1 confirmed event, got %d", len(got))
+		t.Fatalf("expected the event immediately, got %d", len(got))
 	}
 	if got[0].PriceRequested == nil || got[0].PriceRequested.ReqID.Cmp(big.NewInt(2)) != 0 {
 		t.Errorf("payload roundtrip mismatch: %+v", got[0].PriceRequested)
 	}
 
-	// Mark orphaned — should disappear from ListEvents.
-	if err := repo.MarkOrphaned(ctx, evt.ID); err != nil {
-		t.Fatalf("MarkOrphaned: %v", err)
-	}
-	got, err = repo.ListEvents(ctx, ListEventsFilter{}, 5)
+	// Kind filter narrows.
+	none, err := repo.ListEvents(ctx, ListEventsFilter{Kinds: []models.EventKind{models.EventKindAssetRegistered}})
 	if err != nil {
-		t.Fatalf("ListEvents after orphan: %v", err)
+		t.Fatalf("ListEvents kind filter: %v", err)
 	}
-	if len(got) != 0 {
-		t.Errorf("orphaned event still returned: %d", len(got))
+	if len(none) != 0 {
+		t.Errorf("kind filter leaked non-matching rows: %d", len(none))
 	}
 }
 
@@ -190,12 +174,9 @@ func TestIntegration_EventsForRequest(t *testing.T) {
 		if _, err := repo.InsertEvent(ctx, e); err != nil {
 			t.Fatalf("insert: %v", err)
 		}
-		if err := repo.UpdateConfirmations(ctx, e.ID, 5); err != nil {
-			t.Fatalf("confirm: %v", err)
-		}
 	}
 
-	got, err := repo.EventsForRequest(ctx, big.NewInt(7), 5)
+	got, err := repo.EventsForRequest(ctx, big.NewInt(7))
 	if err != nil {
 		t.Fatalf("EventsForRequest: %v", err)
 	}
@@ -208,71 +189,33 @@ func TestIntegration_EventsForRequest(t *testing.T) {
 	}
 }
 
-func TestIntegration_PendingEventsAndChainCursor(t *testing.T) {
+func TestIntegration_AssetRegisteredSeedIdempotent(t *testing.T) {
 	repo, teardown := setupPostgres(t)
 	defer teardown()
 	ctx := context.Background()
 
-	for i := int64(1); i <= 3; i++ {
-		if _, err := repo.InsertEvent(ctx, mkPriceRequested(i, uint64(100+i))); err != nil {
-			t.Fatalf("insert %d: %v", i, err)
-		}
-	}
-
-	pending, err := repo.PendingEvents(ctx, 5, 100)
-	if err != nil {
-		t.Fatalf("PendingEvents: %v", err)
-	}
-	if len(pending) != 3 {
-		t.Errorf("expected 3 pending events, got %d", len(pending))
-	}
-
-	cursor, err := repo.ChainCursor(ctx)
-	if err != nil {
-		t.Fatalf("ChainCursor: %v", err)
-	}
-	if cursor.LastProcessedBlock != 0 {
-		t.Errorf("fresh cursor = %d, want 0", cursor.LastProcessedBlock)
-	}
-	if err := repo.UpdateChainCursor(ctx, 200); err != nil {
-		t.Fatalf("UpdateChainCursor: %v", err)
-	}
-	cursor, _ = repo.ChainCursor(ctx)
-	if cursor.LastProcessedBlock != 200 {
-		t.Errorf("cursor after update = %d, want 200", cursor.LastProcessedBlock)
-	}
-
-	// Idempotent / never moves backward.
-	if err := repo.UpdateChainCursor(ctx, 150); err != nil {
-		t.Fatalf("UpdateChainCursor backwards: %v", err)
-	}
-	cursor, _ = repo.ChainCursor(ctx)
-	if cursor.LastProcessedBlock != 200 {
-		t.Errorf("cursor moved backwards: %d", cursor.LastProcessedBlock)
-	}
-}
-
-func TestIntegration_AggregatorRegistry(t *testing.T) {
-	repo, teardown := setupPostgres(t)
-	defer teardown()
-	ctx := context.Background()
-
-	addr := common.HexToAddress("0x075be31662c2548c4e940d7e769c328a34dcb281")
 	asset := common.HexToHash("0x0f8a193ff464434486c0daf7db2a895884365d2bc84ba47a68fcf89c1b14b5b8")
+	agg := common.HexToAddress("0x075be31662c2548c4e940d7e769c328a34dcb281")
 
-	if err := repo.UpsertAggregator(ctx, addr, asset); err != nil {
-		t.Fatalf("UpsertAggregator: %v", err)
+	// First seed inserts; re-seed is a no-op (deterministic synthetic
+	// tx_hash + UNIQUE(tx_hash, log_index)).
+	first, err := repo.InsertEvent(ctx, models.NewAssetRegisteredSeed(asset, agg))
+	if err != nil || !first {
+		t.Fatalf("first seed: inserted=%v err=%v", first, err)
 	}
-	mapping, err := repo.AggregatorRegistry(ctx)
+	again, err := repo.InsertEvent(ctx, models.NewAssetRegisteredSeed(asset, agg))
 	if err != nil {
-		t.Fatalf("AggregatorRegistry: %v", err)
+		t.Fatalf("re-seed: %v", err)
 	}
-	if got, ok := mapping[addr]; !ok || got != asset {
-		t.Errorf("mapping miss or mismatch: %+v", mapping)
+	if again {
+		t.Error("re-seed should be idempotent (inserted=false)")
 	}
 
-	// Idempotent on conflict.
-	if err := repo.UpsertAggregator(ctx, addr, asset); err != nil {
-		t.Fatalf("UpsertAggregator (replay): %v", err)
+	got, err := repo.ListEvents(ctx, ListEventsFilter{Kinds: []models.EventKind{models.EventKindAssetRegistered}})
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	if len(got) != 1 || got[0].AssetRegistered == nil || got[0].AssetRegistered.Aggregator != agg {
+		t.Errorf("seeded AssetRegistered not readable as expected: %+v", got)
 	}
 }

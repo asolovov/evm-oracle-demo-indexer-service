@@ -73,12 +73,6 @@ type Event struct {
 	AssetRegistered *AssetRegisteredPayload
 }
 
-// ChainCursor mirrors the single-row `chain_cursor` table.
-type ChainCursor struct {
-	LastProcessedBlock uint64
-	UpdatedAt          time.Time
-}
-
 // ToProto converts the domain event to the wire shape served by
 // ListEvents / StreamEvents. Returns an error if Kind has no matching
 // payload populated.
