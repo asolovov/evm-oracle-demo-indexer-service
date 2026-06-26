@@ -51,7 +51,13 @@ func initializeConfig(cmd *cobra.Command, cfg *config.Scheme) error {
 		return fmt.Errorf("bind flags: %w", err)
 	}
 
-	return viper.Unmarshal(cfg)
+	if err := viper.Unmarshal(cfg); err != nil {
+		return fmt.Errorf("unmarshal config: %w", err)
+	}
+
+	// Overrides viper can't express via SetDefault (the JSON asset set,
+	// and defaulting the asset set when unset).
+	return config.ApplyEnvOverrides(cfg)
 }
 
 // bindFlags binds flags to the command.

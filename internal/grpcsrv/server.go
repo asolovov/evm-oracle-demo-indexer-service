@@ -128,6 +128,17 @@ func (s *Server) Start(_ context.Context) error {
 			Time:    30 * time.Second,
 			Timeout: 10 * time.Second,
 		}),
+		// Enforcement policy: tolerate the client's keepalive cadence.
+		// Without this, gRPC-go defaults to MinTime=5m / no pings
+		// without a stream, so a normal client (the API pings every
+		// 30s, PermitWithoutStream=true) gets GOAWAY ENHANCE_YOUR_CALM
+		// "too_many_pings" and the connection flaps. MinTime=10s leaves
+		// headroom under the client's 30s; PermitWithoutStream mirrors
+		// the client so idle gaps between unary calls don't trip it.
+		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
+			MinTime:             10 * time.Second,
+			PermitWithoutStream: true,
+		}),
 	}
 	if s.cfg.NumStreamWorkers > 0 {
 		opts = append(opts, grpc.NumStreamWorkers(s.cfg.NumStreamWorkers))

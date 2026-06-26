@@ -31,7 +31,7 @@ func TestDefaultsRegistered(t *testing.T) {
 		{"healthz.port", 8080},
 		{"chain.name", "ethereum-sepolia"},
 		{"chain.chain_id", uint64(11155111)},
-		{"indexer.backfill_chunk_size", uint64(1000)},
+		{"chain.registry_address", defaultRegistryAddress},
 		{"indexer.stream_subscriber_buffer", 256},
 		{"telemetry.log_level", "info"},
 		{"telemetry.log_format", "json"},
@@ -50,20 +50,40 @@ func TestValidate_AcceptsCompleteScheme(t *testing.T) {
 	s := &Scheme{
 		Database: &DatabaseConfig{Name: "evm_indexer", Password: "x"},
 		Chain: &ChainConfig{
-			Name:              "ethereum-sepolia",
-			ChainID:           11155111,
-			WSURL:             "ws://node",
-			RPCURL:            "http://node",
-			RegistryAddress:   "0x89a6c12a403733c6a817472cec46a530581cb7ef",
-			BackfillFromBlock: 1,
+			Name:            "ethereum-sepolia",
+			ChainID:         11155111,
+			WSURL:           "ws://node",
+			RegistryAddress: "0x89a6c12a403733c6a817472cec46a530581cb7ef",
 		},
 		Indexer: &IndexerConfig{
-			BackfillChunkSize:      1000,
 			StreamSubscriberBuffer: 256,
+			Assets:                 defaultAssets(),
 		},
 	}
 	if err := Validate(s); err != nil {
 		t.Fatalf("Validate returned %v, want nil", err)
+	}
+}
+
+func TestApplyEnvOverrides_DefaultsAssets(t *testing.T) {
+	t.Setenv("INDEXER_ASSETS", "")
+	s := &Scheme{Indexer: &IndexerConfig{StreamSubscriberBuffer: 256}}
+	if err := ApplyEnvOverrides(s); err != nil {
+		t.Fatalf("ApplyEnvOverrides: %v", err)
+	}
+	if len(s.Indexer.Assets) != 10 {
+		t.Errorf("expected 10 default assets, got %d", len(s.Indexer.Assets))
+	}
+}
+
+func TestApplyEnvOverrides_JSON(t *testing.T) {
+	t.Setenv("INDEXER_ASSETS", `[{"symbol":"FOO","asset_id":"0xaa","aggregator":"0xbb"}]`)
+	s := &Scheme{Indexer: &IndexerConfig{StreamSubscriberBuffer: 256}}
+	if err := ApplyEnvOverrides(s); err != nil {
+		t.Fatalf("ApplyEnvOverrides: %v", err)
+	}
+	if len(s.Indexer.Assets) != 1 || s.Indexer.Assets[0].Symbol != "FOO" {
+		t.Errorf("env override not applied: %+v", s.Indexer.Assets)
 	}
 }
 
@@ -91,12 +111,11 @@ func TestValidate_RejectsBadRegistryAddress(t *testing.T) {
 			Name:            "x",
 			ChainID:         1,
 			WSURL:           "ws://x",
-			RPCURL:          "http://x",
 			RegistryAddress: "not-an-address",
 		},
 		Indexer: &IndexerConfig{
-			BackfillChunkSize:      1000,
 			StreamSubscriberBuffer: 256,
+			Assets:                 defaultAssets(),
 		},
 	}
 	err := Validate(s)

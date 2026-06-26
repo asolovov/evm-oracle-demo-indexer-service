@@ -7,8 +7,11 @@ version: '3.8'
 #   - migrate (golang-migrate) applying `./migrations` against it.
 #   - the indexer-service itself.
 #
-# CHAIN_WS_URL and CHAIN_RPC_URL must be set in `.env` (or your shell)
-# before `docker compose up`. Without them config Validate fails fast.
+# CHAIN_WS_URL must be set in `.env` (or your shell) before
+# `docker compose up` — e.g. an Alchemy free-tier wss endpoint. The
+# indexer is live-only (WS subscription); it makes no historical RPC
+# calls, so no RPC URL is needed. Without CHAIN_WS_URL config Validate
+# fails fast.
 
 services:
   postgres:
@@ -61,10 +64,9 @@ services:
       CHAIN_NAME: ${CHAIN_NAME:-ethereum-sepolia}
       CHAIN_CHAIN_ID: ${CHAIN_CHAIN_ID:-11155111}
       CHAIN_WS_URL: ${CHAIN_WS_URL}
-      CHAIN_RPC_URL: ${CHAIN_RPC_URL}
       CHAIN_REGISTRY_ADDRESS: ${CHAIN_REGISTRY_ADDRESS:-0x89a6c12a403733c6a817472cec46a530581cb7ef}
-      CHAIN_BACKFILL_FROM_BLOCK: ${CHAIN_BACKFILL_FROM_BLOCK:-0}
-      INDEXER_BACKFILL_CHUNK_SIZE: ${INDEXER_BACKFILL_CHUNK_SIZE:-1000}
       INDEXER_STREAM_SUBSCRIBER_BUFFER: ${INDEXER_STREAM_SUBSCRIBER_BUFFER:-256}
+      # INDEXER_ASSETS (JSON array) optionally overrides the baked 10-asset
+      # default set; unset = the deployed Ethereum-Sepolia aggregators.
       TELEMETRY_LOG_LEVEL: ${TELEMETRY_LOG_LEVEL:-info}
       TELEMETRY_LOG_FORMAT: ${TELEMETRY_LOG_FORMAT:-json}

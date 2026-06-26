@@ -55,43 +55,48 @@ type HealthzConfig struct {
 
 // ChainConfig describes the single target EVM chain the indexer observes.
 //
-// Single-chain by design — running multiple chains simultaneously is
-// out of scope (spec §1 / §3.2). To swap chains, change the values
-// here and replay from BackfillFromBlock.
+// Single-chain by design (spec §1 / §3.2). The indexer is LIVE-ONLY:
+// it WS-subscribes and never queries history, so there is no RPC
+// endpoint and no backfill block — only the WS URL. (Free RPC tiers
+// don't serve historical eth_getLogs anyway.)
 type ChainConfig struct {
-	// Friendly chain name (e.g. "ethereum-sepolia"). Surfaced in logs and metrics.
+	// Friendly chain name (e.g. "ethereum-sepolia"). Surfaced in logs.
 	Name string `mapstructure:"name"`
 
 	// EIP-155 chain id (e.g. 11155111 for Ethereum Sepolia).
 	ChainID uint64 `mapstructure:"chain_id"`
 
-	// WebSocket endpoint used for live `SubscribeFilterLogs`.
+	// WebSocket endpoint used for live `SubscribeFilterLogs`. The only
+	// chain connection the indexer makes.
 	WSURL string `mapstructure:"ws_url"`
 
-	// JSON-RPC endpoint used for `eth_getLogs`, `latestRoundData`, etc.
-	RPCURL string `mapstructure:"rpc_url"`
-
 	// 20-byte 0x-prefixed lowercase hex of the deployed OracleRegistry.
+	// Subscribed to (for live AssetRegistered logs); never enumerated
+	// on chain — the asset set comes from Assets below.
 	RegistryAddress string `mapstructure:"registry_address"`
-
-	// Block height to start backfilling from on a cold start. Pinned to
-	// the block at/just before the contracts were deployed so backfill
-	// is bounded.
-	BackfillFromBlock uint64 `mapstructure:"backfill_from_block"`
 }
 
-// IndexerConfig holds chainsub catch-up + stream-hub knobs. There is
-// no confirmation gate — events emit on ingest — so the old
-// Confirmations / ReorgCheckIntervalSec knobs are gone.
-type IndexerConfig struct {
-	// Block-chunk size for `eth_getLogs` catch-up calls. Bounded in
-	// Validate so a misconfigured value can't ask a public RPC for an
-	// enormous range in one call.
-	BackfillChunkSize uint64 `mapstructure:"backfill_chunk_size"`
+// AssetConfig is one entry of the deployed asset set. It is the single
+// source of truth the indexer needs about the deployment (the indexer
+// no longer reads the OracleRegistry on chain): it seeds the
+// aggregator->asset mapping for the live subscription AND the
+// AssetRegistered events bootstrapped into the DB on startup.
+type AssetConfig struct {
+	Symbol     string `mapstructure:"symbol"`
+	AssetID    string `mapstructure:"asset_id"`   // bytes32 0x hex
+	Aggregator string `mapstructure:"aggregator"` // 20-byte 0x hex
+}
 
+// IndexerConfig holds the stream-hub knob + the deployed asset set.
+type IndexerConfig struct {
 	// Per-subscriber outbound queue depth on the stream hub. When a
 	// subscriber lags past this, it gets dropped (backpressure).
 	StreamSubscriberBuffer int `mapstructure:"stream_subscriber_buffer"`
+
+	// Assets is the deployed asset set (aggregator + asset_id per
+	// asset). Defaults to the 10 Ethereum-Sepolia aggregators; override
+	// via the INDEXER_ASSETS env (JSON array) for a different deploy.
+	Assets []AssetConfig `mapstructure:"assets"`
 }
 
 // TelemetryConfig holds logging + metrics knobs.

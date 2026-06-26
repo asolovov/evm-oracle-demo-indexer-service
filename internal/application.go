@@ -24,6 +24,7 @@ import (
 	"github.com/asolovov/evm-oracle-demo-indexer-service/internal/grpcsrv"
 	"github.com/asolovov/evm-oracle-demo-indexer-service/internal/healthz"
 	"github.com/asolovov/evm-oracle-demo-indexer-service/internal/metrics"
+	"github.com/asolovov/evm-oracle-demo-indexer-service/internal/models"
 	"github.com/asolovov/evm-oracle-demo-indexer-service/internal/module"
 	"github.com/asolovov/evm-oracle-demo-indexer-service/internal/repository"
 	"github.com/asolovov/evm-oracle-demo-indexer-service/internal/streamhub"
@@ -65,9 +66,10 @@ func NewApplication() (*App, error) {
 //
 //  1. Validate config (fail fast, architecture rule 6).
 //  2. Repository module (opens the pgx pool).
-//  3. Stream hub (shared) + chainsub (owns the chain client in one
-//     goroutine; catches up then live-subscribes; emits on ingest).
-//  4. gRPC server module + healthz module.
+//  3. Bootstrap the configured AssetRegistered events (idempotent).
+//  4. Stream hub (shared) + chainsub (live-only; owns the WS client in
+//     one goroutine; emits on ingest).
+//  5. gRPC server module + healthz module.
 func (app *App) Init() error {
 	if err := config.Validate(app.config); err != nil {
 		return fmt.Errorf("config: %w", err)
@@ -83,21 +85,31 @@ func (app *App) Init() error {
 	}
 	repo := repoModule.Repository()
 
-	// 2. Stream hub — fed by chainsub, consumed by the gRPC server.
+	// 2. Parse the configured asset set once (hex → typed).
+	assets := parseAssets(app.config.Indexer.Assets)
+
+	// 3. Bootstrap AssetRegistered events (rule 8: idempotent upsert,
+	//    runs after the repo is up and before any server registers).
+	//    The indexer is live-only and never observes the historical
+	//    on-chain AssetRegistered logs, so the API gets the asset set
+	//    from these seeded rows.
+	if err := app.bootstrapAssets(context.Background(), repo, assets); err != nil {
+		return fmt.Errorf("bootstrap assets: %w", err)
+	}
+
+	// 4. Stream hub — fed by chainsub, consumed by the gRPC server.
 	app.hub = streamhub.New(app.config.Indexer.StreamSubscriberBuffer, mts.HubDrop())
 
-	// 3. Chain subscriber. Owns its client end-to-end (no sharing →
-	//    no data race). Publishes each persisted event to the hub.
+	// chainsub: live-only WS observer. Owns its client end-to-end (no
+	// sharing → no data race). Publishes each persisted event.
 	app.chainsub = chainsub.New(repo, app.hub, chainsub.Config{
 		WSURL:           app.config.Chain.WSURL,
-		RPCURL:          app.config.Chain.RPCURL,
 		RegistryAddress: common.HexToAddress(app.config.Chain.RegistryAddress),
-		DefaultStart:    app.config.Chain.BackfillFromBlock,
-		ChunkSize:       app.config.Indexer.BackfillChunkSize,
+		Assets:          assets,
 		Metrics:         metrics.Chainsub{R: mts},
 	})
 
-	// 4. gRPC server + healthz.
+	// 5. gRPC server + healthz.
 	srv := grpcsrv.New(app.config.GRPC, repo, app.hub)
 	app.modules.Register(grpcsrv.NewModule(srv))
 
@@ -181,6 +193,44 @@ func (app *App) Version() string { return app.version.String() }
 
 // Modules returns the module manager.
 func (app *App) Modules() *module.Manager { return app.modules }
+
+// parseAssets converts the hex-string config asset set into the typed
+// mapping chainsub seeds from. Validation already guaranteed the hex
+// shapes in config.Validate.
+func parseAssets(in []config.AssetConfig) []chainsub.AssetMapping {
+	out := make([]chainsub.AssetMapping, 0, len(in))
+	for _, a := range in {
+		out = append(out, chainsub.AssetMapping{
+			Aggregator: common.HexToAddress(a.Aggregator),
+			AssetID:    common.HexToHash(a.AssetID),
+		})
+	}
+	return out
+}
+
+// eventInserter is the slice of the repository the asset bootstrap needs.
+type eventInserter interface {
+	InsertEvent(ctx context.Context, e *models.Event) (bool, error)
+}
+
+// bootstrapAssets idempotently seeds one AssetRegistered event per
+// configured asset. InsertEvent is ON CONFLICT DO NOTHING on the
+// deterministic synthetic (tx_hash, log_index), so re-runs are no-ops.
+func (app *App) bootstrapAssets(ctx context.Context, store eventInserter, assets []chainsub.AssetMapping) error {
+	inserted := 0
+	for _, a := range assets {
+		evt := models.NewAssetRegisteredSeed(a.AssetID, a.Aggregator)
+		ok, err := store.InsertEvent(ctx, evt)
+		if err != nil {
+			return fmt.Errorf("seed AssetRegistered for %s: %w", a.AssetID.Hex(), err)
+		}
+		if ok {
+			inserted++
+		}
+	}
+	logger.Log().Infof("bootstrap: %d configured asset(s), %d new AssetRegistered event(s) seeded", len(assets), inserted)
+	return nil
+}
 
 // readyAdapter translates module.Manager.HealthCheckAll's map into a
 // single non-nil error for healthz.ReadyChecker.
