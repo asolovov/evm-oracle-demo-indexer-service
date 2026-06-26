@@ -81,10 +81,13 @@ type ChainConfig struct {
 // no longer reads the OracleRegistry on chain): it seeds the
 // aggregator->asset mapping for the live subscription AND the
 // AssetRegistered events bootstrapped into the DB on startup.
+// json tags matter: the INDEXER_ASSETS override is decoded with
+// encoding/json (see ApplyEnvOverrides), which ignores mapstructure
+// tags — without json tags the fields would silently stay empty.
 type AssetConfig struct {
-	Symbol     string `mapstructure:"symbol"`
-	AssetID    string `mapstructure:"asset_id"`   // bytes32 0x hex
-	Aggregator string `mapstructure:"aggregator"` // 20-byte 0x hex
+	Symbol     string `mapstructure:"symbol"     json:"symbol"`
+	AssetID    string `mapstructure:"asset_id"   json:"asset_id"`   // bytes32 0x hex
+	Aggregator string `mapstructure:"aggregator" json:"aggregator"` // 20-byte 0x hex
 }
 
 // IndexerConfig holds the stream-hub knob + the deployed asset set.

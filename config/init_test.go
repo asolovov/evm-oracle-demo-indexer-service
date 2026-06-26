@@ -77,13 +77,20 @@ func TestApplyEnvOverrides_DefaultsAssets(t *testing.T) {
 }
 
 func TestApplyEnvOverrides_JSON(t *testing.T) {
-	t.Setenv("INDEXER_ASSETS", `[{"symbol":"FOO","asset_id":"0xaa","aggregator":"0xbb"}]`)
+	t.Setenv("INDEXER_ASSETS", `[{"symbol":"FOO","asset_id":"0xa1","aggregator":"0xb2"}]`)
 	s := &Scheme{Indexer: &IndexerConfig{StreamSubscriberBuffer: 256}}
 	if err := ApplyEnvOverrides(s); err != nil {
 		t.Fatalf("ApplyEnvOverrides: %v", err)
 	}
-	if len(s.Indexer.Assets) != 1 || s.Indexer.Assets[0].Symbol != "FOO" {
-		t.Errorf("env override not applied: %+v", s.Indexer.Assets)
+	if len(s.Indexer.Assets) != 1 {
+		t.Fatalf("env override not applied: %+v", s.Indexer.Assets)
+	}
+	// Assert ALL fields decode — asset_id/aggregator need json tags
+	// (encoding/json ignores mapstructure tags). A missing tag silently
+	// leaves them empty.
+	got := s.Indexer.Assets[0]
+	if got.Symbol != "FOO" || got.AssetID != "0xa1" || got.Aggregator != "0xb2" {
+		t.Errorf("env override decoded incomplete: %+v", got)
 	}
 }
 
